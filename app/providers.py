@@ -630,3 +630,84 @@ class MCPSessionProbe(Provider):
             response_snippet=(f"session-sim: {ok_steps}/{len(steps)} steps, "
                               f"version={protocol_version}, session={session_id[:8]}…"),
         )
+
+
+# ---------------------------------------------------------------------------
+# SSEStreamProbe — legacy HTTP+SSE long-poll
+# ---------------------------------------------------------------------------
+#
+# The legacy MCP transport (HTTP+SSE) splits across two requests:
+#   POST /messages  ← JSON-RPC requests (already covered by ApiProbe)
+#   GET  /sse       ← long-poll event-stream the server pushes to
+#
+# Every synthetic MCP probe to date has been on the POST side. Add a
+# probe that does the GET half: open the SSE channel, hold it for
+# a few seconds, read whatever events the server pushes, close. SASE
+# classifiers that key on "long-poll over HTTPS with Accept:
+# text/event-stream" will see the right shape.
+
+class SSEStreamProbe(Provider):
+    """Long-poll GET against an MCP server's SSE endpoint.
+
+    Reads up to ``max_bytes`` or ``max_seconds``, whichever comes
+    first. The connection is allowed to idle so the fabric sees a
+    sustained long-poll, not a quick poll-and-drop.
+    """
+
+    category = "mcp_synthetic"
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        *,
+        user_agent: str = "@modelcontextprotocol/sdk/1.0.4",
+        max_bytes: int = 64 * 1024,
+        max_seconds: float = 8.0,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self._ua = user_agent
+        self._max_bytes = max_bytes
+        self._max_seconds = max_seconds
+
+    async def execute(self, client: httpx.AsyncClient) -> ProviderResult:
+        headers = {
+            "User-Agent": self._ua,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+        try:
+            async with client.stream("GET", self.url, headers=headers) as r:
+                bytes_read = 0
+                started = asyncio.get_event_loop().time()
+                try:
+                    async for chunk in r.aiter_bytes():
+                        bytes_read += len(chunk)
+                        elapsed = asyncio.get_event_loop().time() - started
+                        if bytes_read >= self._max_bytes:
+                            break
+                        if elapsed >= self._max_seconds:
+                            break
+                except (asyncio.TimeoutError, httpx.ReadTimeout):
+                    pass
+                return ProviderResult(
+                    name=self.name,
+                    category=self.category,
+                    method="GET",
+                    url=self.url,
+                    status_code=r.status_code,
+                    ok=r.status_code < 500,
+                    response_snippet=f"sse long-poll: {bytes_read} bytes read",
+                )
+        except httpx.HTTPError as e:
+            return ProviderResult(
+                name=self.name,
+                category=self.category,
+                method="GET",
+                url=self.url,
+                status_code=None,
+                ok=False,
+                error=f"{type(e).__name__}: {e}",
+            )

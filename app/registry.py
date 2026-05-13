@@ -27,6 +27,7 @@ from .providers import (
     PollinationsImage,
     PollinationsText,
     Provider,
+    SSEStreamProbe,
     WebProbe,
 )
 
@@ -617,6 +618,19 @@ def _mcp_synthetic_probes() -> list[Provider]:
                 body_builder=lambda _p: mcp.build_initialize_request(),
                 extra_headers=_streamable_headers(),
                 send_fake_auth=False,
+            ))
+
+    # ---- (3) Legacy HTTP+SSE long-poll GETs ----
+    # Each MCP server that advertises an /sse endpoint gets one
+    # SSEStreamProbe. The probe opens the long-poll GET, reads a few
+    # KB or holds for ~8s, then closes — that's the wire shape SASE
+    # classifiers key on for the legacy transport's read channel.
+    for srv in mcp.PUBLIC_MCP_SERVERS:
+        if srv.get("sse_url"):
+            probes.append(SSEStreamProbe(
+                name=f"{srv['name']} (sse long-poll)",
+                url=srv["sse_url"],
+                user_agent=_ua_for(srv["host"]),
             ))
 
     return probes
