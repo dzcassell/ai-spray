@@ -50,8 +50,9 @@
     --cat-media_gen:      #c79bff;
     --cat-aggregator:     #e6c35a;
     --cat-real_response:  #8fd36a;
-    --cat-mcp_synthetic:  #ff8fb1;
-    --cat-mcp_authed:     #d65f8a;
+    --cat-mcp_synthetic:    #ff8fb1;
+    --cat-mcp_authed:       #d65f8a;
+    --cat-mcp_session_sim:  #b14068;
 
     /* fonts */
     --ff-display: "Major Mono Display", "Courier New", monospace;
@@ -952,8 +953,9 @@
   .cat.media_gen     { background: var(--cat-media_gen);     color: #2d0f50; }
   .cat.aggregator    { background: var(--cat-aggregator);    color: #3a2a00; }
   .cat.real_response { background: var(--cat-real_response); color: #0f3000; }
-  .cat.mcp_synthetic { background: var(--cat-mcp_synthetic); color: #350014; }
-  .cat.mcp_authed { background: var(--cat-mcp_authed); color: #ffffff; }
+  .cat.mcp_synthetic   { background: var(--cat-mcp_synthetic);   color: #350014; }
+  .cat.mcp_authed      { background: var(--cat-mcp_authed);      color: #ffffff; }
+  .cat.mcp_session_sim { background: var(--cat-mcp_session_sim); color: #ffffff; }
 
   /* Config save toast */
   .toast {
@@ -2432,7 +2434,7 @@ const statusClass = (code) => {
   return "s-" + c;
 };
 
-const ALL_CATEGORIES = ["llm_api","chatbot_ui","media_gen","aggregator","real_response","mcp_synthetic","mcp_authed"];
+const ALL_CATEGORIES = ["llm_api","chatbot_ui","media_gen","aggregator","real_response","mcp_synthetic","mcp_authed","mcp_session_sim"];
 
 // ---------- state ----------
 let S = {

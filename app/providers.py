@@ -17,6 +17,7 @@ Each provider represents one way of generating outbound traffic:
 from __future__ import annotations
 
 import abc
+import asyncio
 import random
 import urllib.parse
 from dataclasses import dataclass, field
@@ -496,3 +497,136 @@ class MCPAuthedProbe(Provider):
                 ok=False,
                 error=f"{type(e).__name__}: {e}",
             )
+
+
+# ---------------------------------------------------------------------------
+# MCPSessionProbe — end-to-end synthetic session (slice A2)
+# ---------------------------------------------------------------------------
+#
+# One execute() runs a sequence of POSTs against a single MCP destination
+# on a single connection: initialize → notifications/initialized →
+# tools/list → tools/call → resources/read → DELETE. The point is to
+# produce a *connected* MCP flow on the wire, distinct from the
+# one-shot synthetic probes whose individual messages can look like
+# malformed JSON-RPC noise to a stateful classifier.
+#
+# The server will likely 401/403 after initialize for unauth targets;
+# we keep firing the rest of the sequence anyway because the SASE
+# fabric sees the message *attempts*, which is what the classifier
+# inspects. Per-message pacing is intentionally human-ish (200-800ms)
+# so the connection-reuse pattern is itself a fingerprint.
+
+class MCPSessionProbe(Provider):
+    """Run a multi-message MCP session against one destination.
+
+    The full sequence per execute():
+        POST initialize          → captures Mcp-Session-Id if returned
+        POST notifications/initialized
+        POST tools/list          → notes how many tools were returned
+        POST tools/call          (random tool-call profile)
+        POST resources/read
+        DELETE <url>             (with the session id, to terminate)
+    """
+
+    category = "mcp_session_sim"
+
+    # Inter-message pacing — varied to look like a real assistant
+    # rather than a tight machine loop.
+    PACING_MIN_SEC = 0.2
+    PACING_MAX_SEC = 0.8
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        *,
+        user_agent: str = "mcp-python-sdk/1.2.0",
+        auth_header: str | None = None,
+        auth_value: str | None = None,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self._ua = user_agent
+        self._auth_header = auth_header
+        self._auth_value = auth_value
+
+    async def execute(self, client: httpx.AsyncClient) -> ProviderResult:
+        from . import mcp as _mcp  # late import to avoid load-order cycle
+
+        # Pin one protocol version + one session id for the whole
+        # session so every POST is mutually consistent — that's how
+        # real clients behave once initialize returns.
+        protocol_version = _mcp.pick_protocol_version()
+        session_id = _mcp.synthetic_session_id()
+
+        def hdrs(extra: dict[str, str] | None = None) -> dict[str, str]:
+            h = _mcp.headers_for(
+                "streamable",
+                protocol_version=protocol_version,
+                session_id=session_id,
+            )
+            h["User-Agent"] = self._ua
+            if self._auth_header and self._auth_value:
+                h[self._auth_header] = self._auth_value
+            if extra:
+                h.update(extra)
+            return h
+
+        steps = [
+            ("initialize",                _mcp.build_initialize_request(protocol_version=protocol_version)),
+            ("notifications/initialized", _mcp.build_initialized_notification()),
+            ("tools/list",                _mcp.build_tools_list_request()),
+            ("tools/call",                _mcp.random_tool_call_body()),
+            ("resources/read",            _mcp.build_resources_read_request("file:///etc/hosts")),
+        ]
+
+        last_status: int | None = None
+        ok_steps = 0
+        try:
+            for i, (label, body) in enumerate(steps):
+                r = await client.post(self.url, headers=hdrs(), json=body)
+                last_status = r.status_code
+                if r.status_code < 500:
+                    ok_steps += 1
+                # If the server returned a session id on initialize,
+                # adopt it for the rest of the conversation. This is
+                # what real clients do — the server's session id wins
+                # over whatever the client guessed.
+                if label == "initialize":
+                    server_sid = r.headers.get("Mcp-Session-Id")
+                    if server_sid:
+                        session_id = server_sid
+                if i < len(steps) - 1:
+                    await asyncio.sleep(
+                        random.uniform(self.PACING_MIN_SEC, self.PACING_MAX_SEC)
+                    )
+
+            # Spec says clients SHOULD DELETE the session URL to
+            # terminate the session cleanly. Many servers accept it,
+            # many ignore it — either way it's part of the wire shape.
+            try:
+                await client.request("DELETE", self.url, headers=hdrs())
+            except httpx.HTTPError:
+                pass
+        except httpx.HTTPError as e:
+            return ProviderResult(
+                name=self.name,
+                category=self.category,
+                method="POST",
+                url=self.url,
+                status_code=last_status,
+                ok=False,
+                error=(f"{type(e).__name__}: {e}; completed {ok_steps}/"
+                       f"{len(steps)} steps before failure"),
+            )
+
+        return ProviderResult(
+            name=self.name,
+            category=self.category,
+            method="POST",
+            url=self.url,
+            status_code=last_status,
+            ok=ok_steps >= 1,
+            response_snippet=(f"session-sim: {ok_steps}/{len(steps)} steps, "
+                              f"version={protocol_version}, session={session_id[:8]}…"),
+        )

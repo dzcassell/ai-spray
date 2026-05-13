@@ -23,6 +23,7 @@ from .providers import (
     ApiProbe,
     DuckDuckGoChat,
     MCPAuthedProbe,
+    MCPSessionProbe,
     PollinationsImage,
     PollinationsText,
     Provider,
@@ -621,6 +622,30 @@ def _mcp_synthetic_probes() -> list[Provider]:
     return probes
 
 
+# ---------------------------------------------------------------------------
+# Category: mcp_session_sim — end-to-end synthetic sessions
+# ---------------------------------------------------------------------------
+#
+# One probe per high-signal hosted MCP plus one against a reflector.
+# Each fire runs a full handshake on a single TCP connection so the
+# SASE fabric sees a connected MCP flow (initialize → tools/list →
+# tools/call → resources/read → DELETE) rather than disjoint one-shots.
+
+def _mcp_session_sim_probes() -> list[Provider]:
+    # Pick destinations that historically respond to initialize before
+    # 401'ing, so we get further into the sequence on the wire. Plus
+    # one reflector to exercise the wire shape without a real server.
+    SESSION_DESTS = [
+        ("MCP session-sim → reflector",     "https://httpbin.org/post"),
+        ("MCP session-sim → GitHub",        "https://api.githubcopilot.com/mcp"),
+        ("MCP session-sim → Cloudflare Docs", "https://docs.mcp.cloudflare.com/sse"),
+        ("MCP session-sim → Notion",        "https://mcp.notion.com/mcp"),
+        ("MCP session-sim → Linear",        "https://mcp.linear.app/mcp"),
+        ("MCP session-sim → DeepWiki",      "https://mcp.deepwiki.com/mcp"),
+    ]
+    return [MCPSessionProbe(name=n, url=u) for n, u in SESSION_DESTS]
+
+
 def build_registry(
     categories: set[str] | None = None,
     key_store: Any | None = None,
@@ -647,6 +672,7 @@ def build_registry(
     all_providers += _aggregator_targets()
     all_providers += _real_response_providers()
     all_providers += _mcp_synthetic_probes()
+    all_providers += _mcp_session_sim_probes()
     if key_store is not None:
         for server in mcp.MCP_KEYED_SERVERS:
             all_providers.append(

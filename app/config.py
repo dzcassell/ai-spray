@@ -14,7 +14,7 @@ def _bool(value: str | None, default: bool = False) -> bool:
 
 VALID_CATEGORIES = {
     "llm_api", "chatbot_ui", "media_gen", "aggregator", "real_response",
-    "mcp_synthetic", "mcp_authed",
+    "mcp_synthetic", "mcp_authed", "mcp_session_sim",
 }
 
 
@@ -55,7 +55,8 @@ class Config:
     def from_env(cls) -> "Config":
         raw_cats = os.getenv(
             "CATEGORIES",
-            "llm_api,chatbot_ui,media_gen,aggregator,real_response,mcp_synthetic,mcp_authed",
+            "llm_api,chatbot_ui,media_gen,aggregator,real_response,"
+            "mcp_synthetic,mcp_authed,mcp_session_sim",
         )
         cats = {c.strip() for c in raw_cats.split(",") if c.strip()}
         bad = cats - VALID_CATEGORIES
