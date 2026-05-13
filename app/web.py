@@ -753,6 +753,23 @@ def create_app(
         * Extracted text capped at extract.MAX_EXTRACT_CHARS (~20K)
           inside the extractor itself.
         """
+        MAX_UPLOAD = 10 * 1024 * 1024
+        # 16K slack covers the multipart envelope (boundary headers,
+        # form fields other than 'file'). Reject by Content-Length
+        # before request.form() buffers the whole body in memory.
+        cl_raw = request.headers.get("content-length")
+        if cl_raw is not None:
+            try:
+                cl = int(cl_raw)
+            except ValueError:
+                cl = -1
+            if cl > MAX_UPLOAD + 16 * 1024:
+                return JSONResponse(
+                    {"error": (f"upload too large: Content-Length {cl:,} "
+                               f"exceeds {MAX_UPLOAD:,} byte cap")},
+                    status_code=413,
+                )
+
         # Starlette uses python-multipart for multipart/form-data
         # parsing; the import is implicit. Reading the form pulls the
         # file into memory — fine for our 10 MB cap, would be
