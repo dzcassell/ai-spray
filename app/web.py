@@ -46,6 +46,7 @@ from .keys import KeyStore
 from . import discovery
 from . import extract
 from . import mcp
+from . import mcp_responder
 from . import pii
 from .state import AppState
 
@@ -187,6 +188,7 @@ def create_app(
         return JSONResponse({
             **state.stats_snapshot(),
             "config": _config_to_dict(state.config),
+            "mcp_responder_enabled": mcp_responder.responder_enabled(),
         })
 
     # ------------------ Config ------------------
@@ -1509,5 +1511,17 @@ def create_app(
         Route("/api/agents/start",   agents_start, methods=["POST"]),
         Route("/api/agents/stop",    agents_stop,  methods=["POST"]),
     ]
+
+    # Inbound MCP responder — only mounted when MCP_RESPONDER_ENABLED is set.
+    # Returns [] otherwise, so the lean default never accepts inbound
+    # MCP traffic by accident.
+    responder_routes = mcp_responder.build_routes(state)
+    if responder_routes:
+        routes.extend(responder_routes)
+        log.info(
+            "mcp_responder_enabled",
+            paths=["/mcp-responder/streamable", "/mcp-responder/sse",
+                   "/mcp-responder/sse/messages"],
+        )
 
     return Starlette(debug=False, routes=routes)

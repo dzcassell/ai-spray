@@ -14,7 +14,7 @@ def _bool(value: str | None, default: bool = False) -> bool:
 
 VALID_CATEGORIES = {
     "llm_api", "chatbot_ui", "media_gen", "aggregator", "real_response",
-    "mcp_synthetic", "mcp_authed", "mcp_session_sim",
+    "mcp_synthetic", "mcp_authed", "mcp_session_sim", "mcp_responder",
 }
 
 

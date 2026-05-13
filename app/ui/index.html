@@ -53,6 +53,7 @@
     --cat-mcp_synthetic:    #ff8fb1;
     --cat-mcp_authed:       #d65f8a;
     --cat-mcp_session_sim:  #b14068;
+    --cat-mcp_responder:    #7a2848;
 
     /* fonts */
     --ff-display: "Major Mono Display", "Courier New", monospace;
@@ -956,6 +957,7 @@
   .cat.mcp_synthetic   { background: var(--cat-mcp_synthetic);   color: #350014; }
   .cat.mcp_authed      { background: var(--cat-mcp_authed);      color: #ffffff; }
   .cat.mcp_session_sim { background: var(--cat-mcp_session_sim); color: #ffffff; }
+  .cat.mcp_responder   { background: var(--cat-mcp_responder);   color: #ffffff; }
 
   /* Config save toast */
   .toast {
@@ -1900,6 +1902,9 @@
   <span id="tls-pill" class="pill dead" hidden title="TLS certificate verification is OFF. Mount your SASE re-sign CA into ./certs/ and restart for verified inspection. See CERT HELP.">
     <span class="dot"></span><span class="label">TLS BYPASS</span>
   </span>
+  <span id="responder-pill" class="pill live" hidden title="Inbound MCP responder is live. Point a real MCP client at this host's /mcp-responder/streamable endpoint to test SASE classification of inbound MCP. Lab-use only — no auth.">
+    <span class="dot"></span><span class="label">MCP RESPONDER</span>
+  </span>
   <button id="pause-btn" class="btn">Pause</button>
   <button id="cert-help-btn" class="btn cert-help-btn" type="button" title="Installing your SASE re-sign CA">CERT HELP</button>
   <div class="readouts">
@@ -2537,7 +2542,7 @@ const statusClass = (code) => {
   return "s-" + c;
 };
 
-const ALL_CATEGORIES = ["llm_api","chatbot_ui","media_gen","aggregator","real_response","mcp_synthetic","mcp_authed","mcp_session_sim"];
+const ALL_CATEGORIES = ["llm_api","chatbot_ui","media_gen","aggregator","real_response","mcp_synthetic","mcp_authed","mcp_session_sim","mcp_responder"];
 
 // ---------- state ----------
 let S = {
@@ -2578,6 +2583,14 @@ function renderStats() {
   const tlsPill = $("#tls-pill");
   if (tlsPill) {
     tlsPill.hidden = S.stats.tls_mode !== "bypass";
+  }
+
+  // Responder chip: shows the operator that this container is
+  // currently accepting inbound MCP traffic on /mcp-responder/*.
+  // Stays hidden when MCP_RESPONDER_ENABLED is off (the default).
+  const respPill = $("#responder-pill");
+  if (respPill) {
+    respPill.hidden = !S.stats.mcp_responder_enabled;
   }
 
   $("#tick-age").textContent =
