@@ -1324,10 +1324,13 @@ def create_app(
     async def agents_catalog(request: Request) -> Response:
         from . import agents
         return JSONResponse({
-            "prompts":   agents.PROMPTS,
-            "providers": list(agents.PROVIDERS),
-            "genres":    list(agents.PROMPT_GENRES),
+            "prompts":          agents.PROMPTS,
+            "agentic_prompts":  agents.AGENTIC_PROMPTS,
+            "providers":        list(agents.PROVIDERS),
+            "genres":           list(agents.PROMPT_GENRES),
             "claude_cli_available": agents.claude_cli_available(),
+            "allowed_tools":    agents.AGENTIC_ALLOWED_TOOLS,
+            "sandbox_dir":      agents.AGENT_SANDBOX_DIR,
         })
 
     # GET /api/agents/status — current loop state (running flag,
@@ -1406,6 +1409,24 @@ def create_app(
                     status_code=400,
                 )
             loop_state.enabled_providers = set(providers)
+
+        agentic_mode = body.get("agentic_mode")
+        if agentic_mode is not None:
+            if not isinstance(agentic_mode, bool):
+                return JSONResponse(
+                    {"error": "agentic_mode must be a boolean"},
+                    status_code=400,
+                )
+            loop_state.agentic_mode = agentic_mode
+
+        daily_budget = body.get("daily_token_budget")
+        if daily_budget is not None:
+            if not isinstance(daily_budget, int) or daily_budget < 0:
+                return JSONResponse(
+                    {"error": "daily_token_budget must be an int >= 0"},
+                    status_code=400,
+                )
+            loop_state.daily_token_budget = daily_budget
 
         # If already running, the in-place updates above are enough —
         # the loop reads enabled_* on every iteration. Don't kick off

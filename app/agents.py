@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import os
 import random
 import shutil
@@ -37,6 +38,7 @@ import subprocess  # nosec B404 — used only for the well-known `claude` binary
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -192,6 +194,96 @@ PROMPT_GENRES: tuple[str, ...] = (
     "qa", "codegen", "review", "refactor", "debug", "architecture",
 )
 
+
+# ---------------------------------------------------------------------------
+# Agentic prompts — designed to *force* tool use
+# ---------------------------------------------------------------------------
+# Each task is short enough to cap at ~6 turns but structured so the model
+# cannot complete it from memory — it must Read, Write, run Bash, or
+# WebFetch. The traffic this produces is exactly the mixed bag a SASE
+# fabric sees in real assistant use: model API calls plus file I/O,
+# shell, and outbound HTTPS fetches all signed by the CLI's wire UA.
+#
+# All tasks run in /tmp/agent-sandbox (tmpfs, wiped per container start)
+# so they cannot affect the rest of the container.
+
+AGENTIC_PROMPTS: list[dict[str, str]] = [
+    {
+        "slug":  "agentic-fizzbuzz",
+        "genre": "agentic",
+        "label": "Agentic: build & run fizzbuzz variants",
+        "text":  ("In the current directory, create three Python files "
+                  "fizz_v1.py, fizz_v2.py, fizz_v3.py each printing "
+                  "FizzBuzz for n=1..15 at increasing levels of "
+                  "conciseness (terse to one-liner). Run each with "
+                  "`python3` and report which produced the shortest "
+                  "source while still producing the correct output."),
+    },
+    {
+        "slug":  "agentic-httpbin",
+        "genre": "agentic",
+        "label": "Agentic: fetch httpbin and summarise",
+        "text":  ("Use WebFetch to retrieve https://httpbin.org/json. "
+                  "List the top-level keys in the response, and explain "
+                  "in one sentence what each represents."),
+    },
+    {
+        "slug":  "agentic-readdir",
+        "genre": "agentic",
+        "label": "Agentic: inspect cwd",
+        "text":  ("List the files in the current working directory. "
+                  "Pick the largest one, read its first ten lines, and "
+                  "summarise what kind of file it is."),
+    },
+    {
+        "slug":  "agentic-sha256",
+        "genre": "agentic",
+        "label": "Agentic: write a hashing tool",
+        "text":  ("Write a Python script `hash_it.py` that reads a "
+                  "string from argv and prints its SHA-256 hex digest. "
+                  "Run it on the string 'sasetest' and confirm the "
+                  "output looks like a 64-character hex string."),
+    },
+    {
+        "slug":  "agentic-wiki-metar",
+        "genre": "agentic",
+        "label": "Agentic: research METAR format",
+        "text":  ("Use WebFetch to read "
+                  "https://en.wikipedia.org/wiki/METAR. Write a file "
+                  "`metar_notes.md` (~10 lines) explaining how METAR "
+                  "weather reports are structured, citing the page."),
+    },
+    {
+        "slug":  "agentic-csv",
+        "genre": "agentic",
+        "label": "Agentic: synth a CSV and analyse it",
+        "text":  ("Create a CSV file `sample.csv` with five rows of "
+                  "made-up sales data (date, region, amount in USD). "
+                  "Then write and run a Python script `analyse.py` "
+                  "that reads the CSV and prints the region with the "
+                  "highest total."),
+    },
+]
+
+AGENTIC_PROMPT_BY_SLUG: dict[str, dict[str, str]] = {
+    p["slug"]: p for p in AGENTIC_PROMPTS
+}
+
+# Tools we let the CLI use inside the sandbox. Deliberately allowlist
+# specific Bash command prefixes rather than blanket-granting Bash — a
+# sandbox plus a tight allowlist is the layered defence the lab needs.
+AGENTIC_ALLOWED_TOOLS = ",".join([
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)",
+    "Bash(wc:*)", "Bash(python3:*)", "Bash(sha256sum:*)",
+    "Bash(echo:*)", "Bash(grep:*)", "Bash(find:*)",
+    "Read", "Write", "Edit", "WebFetch",
+])
+
+# Working directory for every agentic fire. The compose tmpfs mount
+# wipes it on every container restart; per-fire wiping happens in
+# _fire_anthropic_via_cli_agentic before each invocation.
+AGENT_SANDBOX_DIR = "/tmp/agent-sandbox"
+
 # Providers we can sprinkle. Each entry knows how to fire one prompt at
 # the matching service. Ordered: anthropic first (because the real CLI
 # may be present), cursor second.
@@ -201,6 +293,21 @@ PROVIDERS: tuple[str, ...] = ("anthropic", "cursor")
 # ---------------------------------------------------------------------------
 # Loop state
 # ---------------------------------------------------------------------------
+
+@dataclass
+class AgentToolCall:
+    """One Read/Write/Bash/WebFetch call observed inside an agentic fire.
+
+    Captured from Claude Code's stream-json output so the UI can render
+    a per-fire tool-call timeline. ``input_summary`` is a short
+    human-readable description of the call's arguments — the full
+    input dict can be massive (code blobs, web responses) and isn't
+    useful in the timeline view.
+    """
+    tool: str          # 'Bash', 'Read', 'Write', 'WebFetch', etc.
+    input_summary: str
+    elapsed_ms: int    # offset from the fire's started_at
+
 
 @dataclass
 class AgentFireResult:
@@ -214,6 +321,15 @@ class AgentFireResult:
     response_text: str        # the model's response, or error message if !ok
     response_chars: int       # length of response_text
     error: str | None = None  # short error class name on failure
+    # Agentic-only fields. Populated by _fire_anthropic_via_cli_agentic
+    # when the loop runs in agentic mode; left at defaults for chat
+    # fires so the UI can branch on `mode`.
+    mode: str = "chat"                                     # "chat" | "agentic"
+    num_turns: int = 0
+    tool_calls: list[AgentToolCall] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 @dataclass
@@ -239,9 +355,42 @@ class AgentLoopState:
     fire_history: deque[AgentFireResult] = field(
         default_factory=lambda: deque(maxlen=50)
     )
+    # Agentic mode: when True, Anthropic fires use the Claude Code CLI
+    # with --max-turns + --allowed-tools so the model exercises real
+    # file/shell/web tools instead of one-shot completions. Requires
+    # the `claude` binary on PATH (Dockerfile.agentic) and an
+    # ANTHROPIC_API_KEY in the KeyStore. Falls back gracefully to
+    # chat mode if either is missing.
+    agentic_mode: bool = False
+    daily_token_budget: int = field(
+        default_factory=lambda: int(
+            os.environ.get("AGENTIC_DAILY_TOKEN_BUDGET", "500000")
+        )
+    )
+    daily_tokens_used: int = 0
+    daily_tokens_reset_at: float = 0.0  # epoch; loop rolls over at UTC midnight
+    agentic_min_gap_sec: int = field(
+        default_factory=lambda: int(
+            os.environ.get("AGENTIC_MIN_GAP_SEC", "300")
+        )
+    )
+
+    def reset_daily_budget_if_due(self) -> None:
+        """Roll the daily token counter over at UTC midnight."""
+        now = time.time()
+        if now >= self.daily_tokens_reset_at:
+            self.daily_tokens_used = 0
+            # Next midnight UTC.
+            now_dt = datetime.now(timezone.utc)
+            tomorrow = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            self.daily_tokens_reset_at = tomorrow.timestamp() + 86400.0
+
+    def budget_remaining(self) -> int:
+        return max(0, self.daily_token_budget - self.daily_tokens_used)
 
     def status(self) -> dict[str, Any]:
         """JSON-safe snapshot for /api/agents/status."""
+        self.reset_daily_budget_if_due()
         return {
             "running":           self.running,
             "started_at":        self.started_at,
@@ -250,6 +399,12 @@ class AgentLoopState:
             "enabled_providers": sorted(self.enabled_providers),
             "min_gap_sec":       self.min_gap_sec,
             "max_gap_sec":       self.max_gap_sec,
+            "agentic_mode":      self.agentic_mode,
+            "agentic_available": claude_cli_available(),
+            "daily_token_budget":   self.daily_token_budget,
+            "daily_tokens_used":    self.daily_tokens_used,
+            "daily_tokens_reset_at": self.daily_tokens_reset_at,
+            "agentic_min_gap_sec":  self.agentic_min_gap_sec,
             "history": [
                 dataclasses.asdict(r) for r in self.fire_history
             ],
@@ -323,6 +478,173 @@ async def _fire_anthropic_via_cli(
     return True, stdout.strip(), None
 
 
+def _summarise_tool_input(tool: str, inp: dict[str, Any]) -> str:
+    """Short, log-safe description of a tool_use's input."""
+    if tool == "Bash":
+        cmd = inp.get("command", "")
+        return cmd[:120] + ("…" if len(cmd) > 120 else "")
+    if tool in ("Read", "Edit"):
+        path = inp.get("file_path") or inp.get("path", "")
+        return str(path)[:120]
+    if tool == "Write":
+        path = inp.get("file_path") or inp.get("path", "")
+        n = len(inp.get("content", "")) if isinstance(inp.get("content"), str) else 0
+        return f"{path} ({n} chars)"[:120]
+    if tool == "WebFetch":
+        url = inp.get("url", "")
+        return str(url)[:120]
+    # Unknown tool — show a JSON-ish hint without dumping the whole dict.
+    try:
+        return json.dumps(inp)[:120]
+    except (TypeError, ValueError):
+        return "(unrepresentable input)"
+
+
+def _parse_stream_json_lines(
+    raw: str, started: float,
+) -> tuple[list[AgentToolCall], int, int, int, float, str]:
+    """Parse Claude Code's --output-format stream-json output.
+
+    Returns ``(tool_calls, num_turns, input_tokens, output_tokens,
+    total_cost_usd, final_result_text)``. Unknown event types are
+    skipped silently — the format evolves and we'd rather tolerate
+    new keys than crash an unrelated fire.
+    """
+    tool_calls: list[AgentToolCall] = []
+    num_turns = 0
+    in_tok = 0
+    out_tok = 0
+    cost_usd = 0.0
+    result_text = ""
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        et = ev.get("type")
+
+        if et == "assistant":
+            num_turns += 1
+            msg = ev.get("message") or {}
+            for blk in msg.get("content") or []:
+                if not isinstance(blk, dict):
+                    continue
+                if blk.get("type") == "tool_use":
+                    tool_calls.append(AgentToolCall(
+                        tool=str(blk.get("name", "?")),
+                        input_summary=_summarise_tool_input(
+                            str(blk.get("name", "?")),
+                            blk.get("input") or {},
+                        ),
+                        elapsed_ms=int((time.time() - started) * 1000),
+                    ))
+
+        elif et == "result":
+            # Final summary event. Contains the full text reply,
+            # usage tokens, and (sometimes) the cost in USD.
+            if isinstance(ev.get("result"), str):
+                result_text = ev["result"]
+            usage = ev.get("usage") or {}
+            try:
+                in_tok = int(usage.get("input_tokens", 0))
+                out_tok = int(usage.get("output_tokens", 0))
+                in_tok += int(usage.get("cache_creation_input_tokens", 0))
+                in_tok += int(usage.get("cache_read_input_tokens", 0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                cost_usd = float(ev.get("total_cost_usd", 0.0))
+            except (TypeError, ValueError):
+                pass
+
+    return tool_calls, num_turns, in_tok, out_tok, cost_usd, result_text
+
+
+async def _fire_anthropic_via_cli_agentic(
+    prompt: dict[str, str],
+    api_key: str,
+    timeout: float,
+) -> tuple[bool, str, str | None, dict[str, Any]]:
+    """Run `claude -p '<prompt>' --max-turns N --allowed-tools ...`
+    inside the sandbox dir and parse the stream-json output.
+
+    Returns ``(ok, response_text, error_class_name, telemetry)`` where
+    telemetry carries ``tool_calls``, ``num_turns``, ``input_tokens``,
+    ``output_tokens``, and ``total_cost_usd`` for the caller to attach
+    to the AgentFireResult.
+    """
+    started = time.time()
+
+    # Wipe the sandbox dir each fire so accumulated state from past
+    # fires never bleeds into a new run. The mkdir is defensive in
+    # case tmpfs hasn't been mounted (e.g. running outside compose).
+    try:
+        os.makedirs(AGENT_SANDBOX_DIR, exist_ok=True)
+        for name in os.listdir(AGENT_SANDBOX_DIR):
+            path = os.path.join(AGENT_SANDBOX_DIR, name)
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.unlink(path)
+            except OSError:
+                pass
+    except OSError as e:
+        log.warning("agentic_sandbox_setup_failed", error=str(e))
+        return False, "", f"SandboxSetup:{type(e).__name__}", {}
+
+    def _run() -> tuple[int, str, str]:
+        env = dict(os.environ)
+        env["ANTHROPIC_API_KEY"] = api_key
+        # Belt-and-braces: even if the image env didn't carry these,
+        # set them here so the CLI behaves deterministically.
+        env.setdefault("DISABLE_AUTOUPDATER", "1")
+        proc = subprocess.run(  # nosec B603 — well-known binary, fixed args
+            [
+                "claude", "-p", prompt["text"],
+                "--model", ANTHROPIC_DEFAULT_MODEL,
+                "--max-turns", "6",
+                "--allowed-tools", AGENTIC_ALLOWED_TOOLS,
+                "--permission-mode", "acceptEdits",
+                "--output-format", "stream-json",
+                "--verbose",
+            ],
+            capture_output=True, text=True,
+            timeout=timeout, env=env, check=False,
+            cwd=AGENT_SANDBOX_DIR,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    try:
+        rc, stdout, stderr = await asyncio.to_thread(_run)
+    except subprocess.TimeoutExpired:
+        return False, "", "TimeoutExpired", {}
+    except FileNotFoundError:
+        return False, "", "FileNotFoundError", {}
+
+    tool_calls, num_turns, in_tok, out_tok, cost, result_text = (
+        _parse_stream_json_lines(stdout, started)
+    )
+    telemetry = {
+        "tool_calls":    tool_calls,
+        "num_turns":     num_turns,
+        "input_tokens":  in_tok,
+        "output_tokens": out_tok,
+        "total_cost_usd": cost,
+    }
+
+    if rc != 0:
+        err_msg = stderr.strip()[:1000] or "non-zero exit"
+        return False, err_msg, f"ExitCode{rc}", telemetry
+    return True, result_text.strip(), None, telemetry
+
+
 async def _fire_anthropic_via_api(
     client: httpx.AsyncClient,
     prompt: dict[str, str],
@@ -369,19 +691,36 @@ async def fire_anthropic(
     client: httpx.AsyncClient,
     prompt: dict[str, str],
     api_key: str,
+    *,
+    agentic: bool = False,
 ) -> AgentFireResult:
-    """Fire one prompt at Anthropic. Prefers the real CLI if available."""
-    started = time.time()
-    timeout = 60.0  # generous — long-form responses can take a while
+    """Fire one prompt at Anthropic.
 
-    if claude_cli_available():
+    Three execution paths in priority order:
+      1. agentic mode + CLI available → multi-turn run with tools,
+         stream-json parsed for the timeline + token usage.
+      2. CLI available (chat mode) → one-shot `claude -p ...` subprocess.
+      3. No CLI → raw POST /v1/messages with a claude-cli UA.
+    """
+    started = time.time()
+    timeout = 180.0 if agentic else 60.0  # agentic runs take much longer
+
+    telemetry: dict[str, Any] = {}
+    if agentic and claude_cli_available():
+        ok, text, err, telemetry = await _fire_anthropic_via_cli_agentic(
+            prompt, api_key, timeout,
+        )
+        mode = "agentic"
+    elif claude_cli_available():
         ok, text, err = await _fire_anthropic_via_cli(
             prompt, api_key, timeout,
         )
+        mode = "chat"
     else:
         ok, text, err = await _fire_anthropic_via_api(
             client, prompt, api_key, timeout,
         )
+        mode = "chat"
 
     elapsed_ms = int((time.time() - started) * 1000)
     return AgentFireResult(
@@ -394,6 +733,12 @@ async def fire_anthropic(
         response_text=text,
         response_chars=len(text),
         error=err,
+        mode=mode,
+        num_turns=int(telemetry.get("num_turns", 0)),
+        tool_calls=list(telemetry.get("tool_calls", [])),
+        input_tokens=int(telemetry.get("input_tokens", 0)),
+        output_tokens=int(telemetry.get("output_tokens", 0)),
+        total_cost_usd=float(telemetry.get("total_cost_usd", 0.0)),
     )
 
 
@@ -533,19 +878,31 @@ async def run_loop(
                 p for p in PROVIDERS
                 if p in state.enabled_providers
             ]
-            prompts = [
+            chat_prompts = [
                 PROMPT_BY_SLUG[s] for s in state.enabled_prompts
                 if s in PROMPT_BY_SLUG
             ]
 
-            if not providers or not prompts:
+            if not providers or not chat_prompts:
                 # Nothing to fire — sleep briefly and check again. Don't
                 # spin tightly.
                 await asyncio.sleep(5.0)
                 continue
 
             provider = random.choice(providers)
-            prompt = random.choice(prompts)
+            # Agentic mode runs the agentic library on Anthropic fires;
+            # other provider/mode combinations use the chat prompt set.
+            # We intentionally don't gate agentic prompts behind the
+            # enabled_prompts toggle — the whole agentic library is
+            # tiny (six tasks) and the agentic toggle itself is the
+            # opt-in.
+            if (provider == "anthropic"
+                    and state.agentic_mode
+                    and claude_cli_available()
+                    and state.budget_remaining() > 0):
+                prompt = random.choice(AGENTIC_PROMPTS)
+            else:
+                prompt = random.choice(chat_prompts)
 
             # Look up the key. If missing, record an error result and
             # continue — the loop should not silently stop because one
@@ -560,6 +917,27 @@ async def run_loop(
                             provider=provider, error=str(e))
                 key = None
 
+            # Per-fire agentic-mode decision: only for Anthropic, only
+            # if the toggle is on, only if the CLI is on PATH, and only
+            # if we have budget remaining. Falls back to chat mode in
+            # every other case rather than skipping the fire entirely.
+            state.reset_daily_budget_if_due()
+            fire_agentic = (
+                provider == "anthropic"
+                and state.agentic_mode
+                and claude_cli_available()
+                and state.budget_remaining() > 0
+            )
+            if (provider == "anthropic" and state.agentic_mode
+                    and not fire_agentic):
+                # Note why we downgraded so the operator can spot
+                # mismatched expectations in the log.
+                log.info(
+                    "agentic_downgraded_to_chat",
+                    cli_available=claude_cli_available(),
+                    budget_remaining=state.budget_remaining(),
+                )
+
             if not key:
                 state.fire_history.append(AgentFireResult(
                     provider=provider, prompt_slug=prompt["slug"],
@@ -571,20 +949,39 @@ async def run_loop(
                 state.total_fired += 1
             else:
                 if provider == "anthropic":
-                    result = await fire_anthropic(client, prompt, key)
+                    result = await fire_anthropic(
+                        client, prompt, key, agentic=fire_agentic,
+                    )
                 else:
                     result = await fire_cursor(client, prompt, key)
                 state.fire_history.append(result)
                 state.total_fired += 1
+                # Charge tokens against the daily budget on every
+                # agentic fire (even failed ones — Anthropic charges
+                # for partial responses).
+                if result.mode == "agentic":
+                    state.daily_tokens_used += (
+                        result.input_tokens + result.output_tokens
+                    )
                 log.info("agent_fire",
                          provider=provider, prompt_slug=prompt["slug"],
+                         mode=result.mode,
                          ok=result.ok, elapsed_ms=result.elapsed_ms,
                          response_chars=result.response_chars,
+                         num_turns=result.num_turns,
+                         tool_calls=len(result.tool_calls),
+                         tokens=result.input_tokens + result.output_tokens,
                          error=result.error)
 
             # Sleep until the next fire. Random gap in [min, max] —
-            # matches the existing scheduler's pacing semantics.
-            gap = random.uniform(state.min_gap_sec, state.max_gap_sec)
+            # the agentic floor overrides when agentic mode is on,
+            # because agentic runs are ~6x the cost of one-shots.
+            lo = state.min_gap_sec
+            hi = max(state.max_gap_sec, lo)
+            if state.agentic_mode:
+                lo = max(lo, state.agentic_min_gap_sec)
+                hi = max(hi, lo)
+            gap = random.uniform(lo, hi)
             await asyncio.sleep(gap)
 
     except asyncio.CancelledError:
