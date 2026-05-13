@@ -45,11 +45,36 @@ from typing import Any
 # JSON-RPC 2.0 envelope helpers
 # ---------------------------------------------------------------------------
 
-# MCP protocol revision currently in widest deployment. The 2024-11-05
-# revision introduced Streamable HTTP and deprecated the legacy SSE
-# transport; both transports still see real-world traffic, which is
-# why we generate both shapes.
-MCP_PROTOCOL_VERSION = "2024-11-05"
+# MCP protocol revisions seen in real-world traffic. We rotate across
+# the set per probe so SASE classifiers see the variety they'd see in
+# a heterogeneous client population:
+#
+#   * 2024-11-05 — first version that pinned Streamable HTTP semantics;
+#                  still widely deployed by older clients.
+#   * 2025-03-26 — added JSON-RPC batching and Mcp-Session-Id; legacy
+#                  HTTP+SSE was officially deprecated here.
+#   * 2025-06-18 — current normative version. Adds elicitation,
+#                  resource indicators (RFC 8707) for OAuth, removes
+#                  JSON-RPC batching.
+#
+# DEFAULT_PROTOCOL_VERSION is kept for callers that need a single
+# concrete value (e.g. the MCP-Protocol-Version header on the very
+# first POST, when no negotiation has happened yet).
+MCP_PROTOCOL_VERSIONS: tuple[str, ...] = (
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+)
+DEFAULT_PROTOCOL_VERSION: str = MCP_PROTOCOL_VERSIONS[-1]
+# Back-compat alias — call sites that already imported the singular
+# name continue to work. New code should prefer pick_protocol_version()
+# or pass a version explicitly.
+MCP_PROTOCOL_VERSION = DEFAULT_PROTOCOL_VERSION
+
+
+def pick_protocol_version() -> str:
+    """Randomly choose a protocol version for the next probe."""
+    return random.choice(MCP_PROTOCOL_VERSIONS)
 
 
 def _msg_id() -> str:
@@ -60,14 +85,22 @@ def _msg_id() -> str:
 def build_initialize_request(
     client_name: str = "hairspray-test-client",
     client_version: str = "1.0.0",
+    protocol_version: str | None = None,
 ) -> dict[str, Any]:
-    """The required first message of any MCP session."""
+    """The required first message of any MCP session.
+
+    ``protocol_version`` defaults to a random pick from
+    MCP_PROTOCOL_VERSIONS so successive probes rotate through the
+    versions in real-world deployment.
+    """
+    if protocol_version is None:
+        protocol_version = pick_protocol_version()
     return {
         "jsonrpc": "2.0",
         "id": _msg_id(),
         "method": "initialize",
         "params": {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "roots": {"listChanged": True},
                 "sampling": {},
@@ -154,21 +187,33 @@ STREAMABLE_HTTP_ACCEPT = "application/json, text/event-stream"
 LEGACY_SSE_ACCEPT = "application/json"
 
 
-def headers_for(transport: str) -> dict[str, str]:
+def headers_for(
+    transport: str,
+    protocol_version: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, str]:
     """Headers the SASE classifier sees on the outbound POST.
 
-    ``transport`` is "streamable" or "sse-legacy".
+    ``transport`` is "streamable" or "sse-legacy". ``protocol_version``
+    is echoed back in the MCP-Protocol-Version header (defaults to a
+    random pick so successive probes vary). ``session_id``, if given,
+    is set as Mcp-Session-Id; real clients echo whatever the server
+    returned on the initialize response on every subsequent POST.
     """
+    if protocol_version is None:
+        protocol_version = pick_protocol_version()
     if transport == "streamable":
-        return {
+        h = {
             "Content-Type": "application/json",
             "Accept": STREAMABLE_HTTP_ACCEPT,
-            # MCP-Protocol-Version was added in spec rev 2025-03 and
-            # several inspecting fabrics now look for it as a strong
-            # MCP signal. Including it makes the probe more
-            # classifiable, not less.
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            # MCP-Protocol-Version is mandated post-initialize since
+            # spec rev 2025-03-26. Several inspecting fabrics now look
+            # for it as a strong MCP signal.
+            "MCP-Protocol-Version": protocol_version,
         }
+        if session_id:
+            h["Mcp-Session-Id"] = session_id
+        return h
     # Legacy
     return {
         "Content-Type": "application/json",
@@ -445,10 +490,19 @@ def build_authed_probe_body() -> dict[str, Any]:
     return build_initialize_request()
 
 
-def headers_for_keyed(server: dict[str, Any], api_key: str) -> dict[str, str]:
+def headers_for_keyed(
+    server: dict[str, Any],
+    api_key: str,
+    protocol_version: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, str]:
     """Headers for an authed MCP server probe — transport headers
     plus the server-specific auth header."""
-    h = dict(headers_for(server["transport"]))
+    h = dict(headers_for(
+        server["transport"],
+        protocol_version=protocol_version,
+        session_id=session_id,
+    ))
     h["User-Agent"] = server["user_agent"]
     h[server["auth_header"]] = server["auth_format"].format(key=api_key)
     return h
