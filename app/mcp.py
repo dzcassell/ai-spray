@@ -175,6 +175,183 @@ def build_initialized_notification() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Extended method coverage
+# ---------------------------------------------------------------------------
+#
+# These methods appear in real MCP traffic but were missing from the
+# synthetic catalogue. Each is a distinct on-the-wire fingerprint that
+# a SASE classifier might key on; including all of them gives the
+# fabric the full surface to fingerprint against.
+
+def build_ping_request() -> dict[str, Any]:
+    """ping is the cheap heartbeat method — spec-defined, both sides
+    can issue it. Easy fingerprint because the body is tiny and the
+    method name is unambiguous."""
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "ping",
+    }
+
+
+def build_roots_list_request() -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "roots/list",
+    }
+
+
+def build_logging_set_level_request(level: str = "info") -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "logging/setLevel",
+        "params": {"level": level},
+    }
+
+
+def build_completion_complete_request(
+    ref_type: str = "ref/prompt",
+    ref_name: str = "summarize",
+    arg_name: str = "topic",
+    arg_value: str = "qua",
+) -> dict[str, Any]:
+    """completion/complete — autocomplete inside a prompt or resource
+    template argument. Server returns up to 100 candidate completions."""
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "completion/complete",
+        "params": {
+            "ref": {"type": ref_type, "name": ref_name},
+            "argument": {"name": arg_name, "value": arg_value},
+        },
+    }
+
+
+def build_sampling_create_message_request(prompt: str) -> dict[str, Any]:
+    """sampling/createMessage — server-initiated reverse direction
+    where the server asks the client's LLM to generate text. Even as
+    a one-shot client probe (which is technically invalid, the client
+    is the receiver) this body still produces a classifiable signal."""
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "sampling/createMessage",
+        "params": {
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": prompt}},
+            ],
+            "modelPreferences": {"hints": [{"name": "claude-3-5-sonnet"}]},
+            "maxTokens": 256,
+        },
+    }
+
+
+def build_elicitation_elicit_request(message: str = "What is your name?") -> dict[str, Any]:
+    """elicitation/elicit — new in spec rev 2025-06-18. Server asks
+    the client to elicit a structured response from the user. Strong
+    recency signal for fingerprinting modern MCP clients."""
+    return {
+        "jsonrpc": "2.0",
+        "id": _msg_id(),
+        "method": "elicitation/elicit",
+        "params": {
+            "message": message,
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    }
+
+
+# Notifications (no id field — JSON-RPC 2.0 rule). Notification methods
+# do not produce server responses; the wire shape is "fire and observe."
+# Useful for testing classifiers that look for the methods themselves
+# rather than for request/response pairs.
+
+def build_progress_notification(
+    token: str | int = "hairspray-progress",
+    progress: float = 0.5,
+    total: float = 1.0,
+) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "total": total,
+        },
+    }
+
+
+def build_cancelled_notification(request_id: str | None = None) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {
+            "requestId": request_id or _msg_id(),
+            "reason": "User cancelled",
+        },
+    }
+
+
+def build_resources_updated_notification(
+    uri: str = "file:///tmp/example.txt",
+) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {"uri": uri},
+    }
+
+
+def build_tools_list_changed_notification() -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/list_changed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC batching (2025-03-26 era)
+# ---------------------------------------------------------------------------
+
+def build_batch(*messages: dict[str, Any]) -> list[dict[str, Any]]:
+    """Wrap one or more JSON-RPC messages in a batch array.
+
+    JSON-RPC 2.0 batching was permitted in MCP spec rev 2025-03-26 and
+    removed again in 2025-06-18. Real classifiers in 2026 should still
+    recognize the shape because clients pinned to 2025-03-26 continue
+    to emit it. The wire shape is just a top-level array — body
+    serialization is unchanged.
+    """
+    return list(messages)
+
+
+# ---------------------------------------------------------------------------
+# Session id helper
+# ---------------------------------------------------------------------------
+
+def synthetic_session_id() -> str:
+    """Mint a fake Mcp-Session-Id.
+
+    A real client echoes back the value the server set on the
+    initialize response. For one-shot synthetic probes there is no
+    such value, but presence of the header itself is a strong MCP
+    fingerprint signal — better to send a plausible UUID than to omit
+    the header entirely.
+    """
+    return uuid.uuid4().hex
+
+
+# ---------------------------------------------------------------------------
 # Headers per transport
 # ---------------------------------------------------------------------------
 
