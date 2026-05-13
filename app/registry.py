@@ -633,6 +633,44 @@ def _mcp_synthetic_probes() -> list[Provider]:
                 user_agent=_ua_for(srv["host"]),
             ))
 
+    # ---- (4) OAuth resource-indicator probes (RFC 8707) ----
+    # Spec rev 2025-06-18 mandates that clients echo a resource=
+    # indicator on POSTs to OAuth-gated MCP servers. The wire shape
+    # is distinctive: Authorization: Bearer <jwt> + a Resource header
+    # (or query param) naming the protected MCP URL. Even with a
+    # synthesized JWT that no real server will accept, the inspecting
+    # fabric still sees the recognisable pattern.
+    OAUTH_RI_TARGETS = [
+        # Cherry-pick OAuth-gated MCPs where this pattern is most
+        # realistic in 2026. The shape is identical across them;
+        # we don't need every entry from PUBLIC_MCP_SERVERS.
+        ("Atlassian MCP",    "https://mcp.atlassian.com/v1/sse"),
+        ("Asana MCP",        "https://mcp.asana.com/sse"),
+        ("Sentry MCP",       "https://mcp.sentry.dev/mcp"),
+        ("Notion MCP",       "https://mcp.notion.com/mcp"),
+        ("Cloudflare Docs",  "https://docs.mcp.cloudflare.com/sse"),
+        ("Linear MCP",       "https://mcp.linear.app/mcp"),
+        ("Vercel MCP",       "https://mcp.vercel.com/mcp"),
+        ("Stripe MCP",       "https://mcp.stripe.com/v1"),
+    ]
+    for label, url in OAUTH_RI_TARGETS:
+        probes.append(ApiProbe(
+            name=f"{label} (oauth resource-indicator)",
+            url=url,
+            user_agent=UA_PYTHON_SDK,
+            category="mcp_synthetic",
+            body_builder=lambda _p: mcp.build_initialize_request(
+                protocol_version="2025-06-18",
+            ),
+            extra_headers=mcp.headers_for_resource_indicator(
+                "streamable", url, protocol_version="2025-06-18",
+            ),
+            # The probe carries its own Authorization header
+            # (fake JWT) — don't let ApiProbe overwrite it with
+            # the generic Bearer sk-lab placeholder.
+            send_fake_auth=False,
+        ))
+
     return probes
 
 

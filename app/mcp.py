@@ -12,10 +12,12 @@ Three slices land in this module:
   Notion integration token, Linear API key); those will plug into
   the existing key-store pattern.
 
-* **Slice C (DLP)**: the Profile Tests endpoint will gain a
-  ``payload_shape="mcp"`` mode that wraps synthetic PII inside an
-  MCP ``tools/call`` envelope. Reuses ``build_initialize_request``
-  and ``build_tools_call_request`` from this module.
+* **Slice C (DLP)**: the Profile Tests endpoint accepts
+  ``payload_shape="mcp"`` to wrap synthetic PII inside an MCP
+  ``tools/call`` envelope. Tests whether SASE DLP engines parse
+  the JSON-RPC body and inspect ``params.arguments`` for PII vs.
+  treating the whole payload as opaque JSON. See
+  ``wrap_pii_as_mcp_tool_call`` below.
 
 ## On the wire
 
@@ -37,7 +39,11 @@ the URL and the ``Accept`` header.
 """
 from __future__ import annotations
 
+import base64
+import json
 import random
+import secrets
+import time
 import uuid
 from typing import Any
 
@@ -349,6 +355,94 @@ def synthetic_session_id() -> str:
     the header entirely.
     """
     return uuid.uuid4().hex
+
+
+# ---------------------------------------------------------------------------
+# OAuth resource-indicator probes (MCP spec rev 2025-06-18 + RFC 8707)
+# ---------------------------------------------------------------------------
+#
+# Modern MCP servers gate access via OAuth and require the client to
+# specify which *protected resource* it's asking the token to apply
+# to. The spec rev 2025-06-18 mandates that clients honor RFC 8707
+# resource indicators when the server returns a WWW-Authenticate
+# challenge of the form:
+#
+#   WWW-Authenticate: Bearer resource="https://mcp.example.com/mcp"
+#
+# The follow-up authenticated POST then carries:
+#
+#   Authorization: Bearer <jwt or opaque token>
+#
+# plus the resource indicator either as a header or a query param
+# (per RFC 8707; deployments vary). SASE classifiers built in 2026
+# key on this distinctive pattern because non-MCP services don't
+# emit it.
+#
+# We can't perform the full dance against an unauth target (the real
+# challenge would mint an unpredictable resource indicator per server
+# version), but we can fabricate the *follow-up POST shape* the
+# fabric sees in production: a JWT-shaped bearer + the resource= claim
+# pointing back at the destination URL. That's the wire signature
+# worth fingerprinting; the actual token never validates and the
+# server 401s, which is fine — the inspecting fabric still sees the
+# pattern.
+
+
+def build_jwt_shaped_blob() -> str:
+    """Return a syntactically-valid but cryptographically-invalid JWT.
+
+    Three base64url segments separated by dots, in the canonical
+    header.payload.signature shape. No real server will accept it;
+    SASE engines that key on the JWT structure see what they expect.
+    """
+    def _b64(obj: dict[str, Any]) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    now = int(time.time())
+    header = _b64({"alg": "RS256", "typ": "JWT", "kid": uuid.uuid4().hex[:16]})
+    payload = _b64({
+        "iss":   "https://auth.hairspray.lab",
+        "sub":   f"hairspray-test-{uuid.uuid4().hex[:8]}",
+        "aud":   "mcp-resource-server",
+        "iat":   now - 5,
+        "exp":   now + 900,
+        "scope": "mcp:read mcp:write",
+    })
+    # The signature is just random bytes b64url'd to the right length;
+    # nothing verifies it.
+    signature = base64.urlsafe_b64encode(
+        secrets.token_bytes(64),
+    ).rstrip(b"=").decode("ascii")
+    return f"{header}.{payload}.{signature}"
+
+
+def headers_for_resource_indicator(
+    transport: str,
+    resource_url: str,
+    *,
+    protocol_version: str | None = None,
+    session_id: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, str]:
+    """Headers for the second leg of the OAuth resource-indicator dance.
+
+    Carries Authorization + the RFC 8707 resource= indicator in the
+    custom 'Resource' header (one common deployment choice; servers
+    that prefer the query-param form ignore the header).
+    """
+    h = headers_for(
+        transport,
+        protocol_version=protocol_version,
+        session_id=session_id,
+    )
+    token = api_key or build_jwt_shaped_blob()
+    h["Authorization"] = f"Bearer {token}"
+    h["Resource"] = resource_url
+    h["WWW-Authenticate-Echo"] = f'Bearer resource="{resource_url}"'
+    return h
+
+
 
 
 # ---------------------------------------------------------------------------
