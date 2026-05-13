@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import io
 import logging
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +46,16 @@ log = logging.getLogger(__name__)
 # Hard cap on extracted text we'll send to a model. Above this we
 # truncate and tell the model the doc was longer.
 MAX_EXTRACT_CHARS = 20_000
+
+# Decompression-bomb guards for ZIP-based formats (DOCX, XLSX). The
+# raw upload is already capped at 10 MB by the web layer, but a 10 MB
+# zip can expand to multiple gigabytes — these caps reject anything
+# whose decompressed size would dominate the container's RAM. Picked
+# to allow real-world office documents (sharedStrings.xml can be tens
+# of MB on a heavily-formatted spreadsheet) but block obviously
+# malicious inflation.
+MAX_ZIP_ENTRY_BYTES = 50 * 1024 * 1024       # 50 MB per single inner file
+MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024      # 200 MB summed across entries
 
 # Inline-text extensions (no parser; just a decode pass).
 INLINE_TEXT_EXTS = {
@@ -161,12 +172,46 @@ def _extract_pdf(filename: str, data: bytes) -> ExtractResult:
 
 
 # ---------------------------------------------------------------------------
+# Shared: ZIP-bomb guard for DOCX / XLSX (both are PK zip archives)
+# ---------------------------------------------------------------------------
+
+def _assert_zip_safe(data: bytes, kind: str) -> None:
+    """Raise ValueError if the zip would inflate past our caps.
+
+    Cheap inspection: ZipFile.infolist() reads only the central
+    directory, so this is O(n) in entry count, not in decompressed
+    size. No data is materialized.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            total = 0
+            for info in zf.infolist():
+                if info.file_size > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(
+                        f"{kind} entry {info.filename!r} would decompress to "
+                        f"{info.file_size:,} bytes (cap "
+                        f"{MAX_ZIP_ENTRY_BYTES:,}); refusing — possible "
+                        f"decompression bomb."
+                    )
+                total += info.file_size
+                if total > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError(
+                        f"{kind} would decompress to >{total:,} bytes (cap "
+                        f"{MAX_ZIP_TOTAL_BYTES:,}); refusing — possible "
+                        f"decompression bomb."
+                    )
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"{kind} is not a valid zip archive: {e}") from e
+
+
+# ---------------------------------------------------------------------------
 # DOCX — python-docx
 # ---------------------------------------------------------------------------
 
 def _extract_docx(filename: str, data: bytes) -> ExtractResult:
     import docx  # type: ignore[import-not-found]  # python-docx package
 
+    _assert_zip_safe(data, "DOCX")
     doc = docx.Document(io.BytesIO(data))
     parts: list[str] = []
 
@@ -220,6 +265,7 @@ def _extract_docx(filename: str, data: bytes) -> ExtractResult:
 def _extract_xlsx(filename: str, data: bytes) -> ExtractResult:
     import openpyxl  # type: ignore[import-not-found]
 
+    _assert_zip_safe(data, "XLSX")
     # data_only=True → formula cells return their cached value, not
     # the formula string. read_only=True → don't try to load styles
     # and other heavy chrome. We just want the text.

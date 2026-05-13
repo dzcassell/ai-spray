@@ -811,7 +811,12 @@ def create_app(
             )
 
         try:
-            result = extract.extract(filename, content)
+            # pypdf/docx/openpyxl are blocking C-extension code; run
+            # them on a worker thread so a 100-page PDF doesn't stall
+            # every SSE stream the process is serving.
+            result = await asyncio.to_thread(
+                extract.extract, filename, content,
+            )
         except ValueError as e:
             # Unsupported extension — clean 422 with the message.
             return JSONResponse({"error": str(e)}, status_code=422)
