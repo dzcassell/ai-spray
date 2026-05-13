@@ -286,6 +286,12 @@ async def _main_async() -> int:
     # still failing" debugging is a matter of reading the first few
     # lines of `docker compose logs hairspray`.
     verify_arg = _resolve_tls_verify(cfg, log)
+    if isinstance(verify_arg, str):
+        tls_mode = "custom-bundle"
+    elif verify_arg is True:
+        tls_mode = "system"
+    else:
+        tls_mode = "bypass"
 
     async with httpx.AsyncClient(
         http2=True,
@@ -295,7 +301,9 @@ async def _main_async() -> int:
         verify=verify_arg,
     ) as client:
 
-        state = AppState(initial_config=cfg, providers=providers)
+        state = AppState(
+            initial_config=cfg, providers=providers, tls_mode=tls_mode,
+        )
         app = create_app(state, client, key_store=key_store)
 
         uvi_config = uvicorn.Config(

@@ -40,8 +40,12 @@ class AppState:
         self,
         initial_config: Config,
         providers: list["Provider"],
+        tls_mode: str = "unknown",
     ) -> None:
         self._config = initial_config
+        # Resolved at boot by main._resolve_tls_verify; surfaced via
+        # /api/status so the UI can warn when verification is off.
+        self.tls_mode: str = tls_mode
         # Dict preserves insertion order so the UI table stays stable.
         self._providers: dict[str, "Provider"] = {p.name: p for p in providers}
         self._enabled: dict[str, bool] = {p.name: True for p in providers}
@@ -347,6 +351,7 @@ class AppState:
     def stats_snapshot(self) -> dict:
         now = time.time()
         return {
+            "tls_mode": self.tls_mode,
             "uptime_seconds": round(now - self.started_at, 1),
             "last_tick_seconds_ago": (
                 round(now - self.last_tick_at, 1)
