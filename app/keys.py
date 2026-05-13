@@ -240,7 +240,9 @@ class KeyStore:
     async def _ensure_loaded_locked(self) -> None:
         """Populate in-memory state from disk. Caller must hold the lock."""
         if not self._loaded:
-            self._keys, self._models = await asyncio.to_thread(self._load_sync)
+            self._keys, self._models, self._mcp_keys = (
+                await asyncio.to_thread(self._load_sync)
+            )
             self._loaded = True
 
     async def set(self, provider: str, key: str) -> None:
