@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 
-from .providers import BROWSER_UAS, stream_read_capped
+from .providers import BROWSER_UAS, cached_vqd, store_vqd, stream_read_capped
 
 
 # ---------------------------------------------------------------------------
@@ -565,28 +565,33 @@ async def _run_duckduckgo(
             url=STATUS_URL, body=msg,
         )
 
-    try:
-        s = await client.get(
-            STATUS_URL,
-            headers={
-                "User-Agent": ua, "Accept": "*/*",
-                "x-vqd-accept": "1", "Cache-Control": "no-store",
-            },
-        )
-    except httpx.HTTPError as e:
-        return err(f"status handshake failed: {type(e).__name__}: {e}")
-
-    vqd = s.headers.get("x-vqd-4") or s.headers.get("x-vqd-hash-1")
+    # Try the shared VQD cache first; fall back to a fresh preflight
+    # GET on miss. Saves an HTTP RTT on every cache hit (most fires).
+    vqd = cached_vqd(ua)
     if not vqd:
-        return PromptResult(
-            target_id=tid, provider="duckduckgo", model=model,
-            kind="error", label=label,
-            ok=False, status=s.status_code,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            url=STATUS_URL,
-            body=("no vqd token in status response — DDG likely rotated "
-                  "their anti-abuse header scheme"),
-        )
+        try:
+            s = await client.get(
+                STATUS_URL,
+                headers={
+                    "User-Agent": ua, "Accept": "*/*",
+                    "x-vqd-accept": "1", "Cache-Control": "no-store",
+                },
+            )
+        except httpx.HTTPError as e:
+            return err(f"status handshake failed: {type(e).__name__}: {e}")
+
+        vqd = s.headers.get("x-vqd-4") or s.headers.get("x-vqd-hash-1")
+        if not vqd:
+            return PromptResult(
+                target_id=tid, provider="duckduckgo", model=model,
+                kind="error", label=label,
+                ok=False, status=s.status_code,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                url=STATUS_URL,
+                body=("no vqd token in status response — DDG likely rotated "
+                      "their anti-abuse header scheme"),
+            )
+        store_vqd(ua, vqd)
 
     try:
         # 256 KiB caps the DDG SSE body — chat completions are

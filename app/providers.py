@@ -32,6 +32,42 @@ log = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
+# DDG VQD cache
+# ---------------------------------------------------------------------------
+# DuckDuckGo's chat backend rotates a CSRF-like "vqd" token via a
+# preflight GET to /duckchat/v1/status. The token is valid for some
+# minutes; firing one every chat post doubles the HTTP RTTs. Cache
+# per-UA so concurrent fires with different browser UAs each keep
+# their own valid token, but successive fires from the same fake
+# browser reuse it.
+
+import time as _time
+import threading as _threading
+
+_VQD_TTL_SEC = 240.0  # DDG observed validity window is ~5 min; refresh early
+_vqd_cache: dict[str, tuple[str, float]] = {}
+_vqd_lock = _threading.Lock()
+
+
+def cached_vqd(user_agent: str) -> str | None:
+    """Return a still-fresh VQD for ``user_agent`` or None if missing/stale."""
+    with _vqd_lock:
+        entry = _vqd_cache.get(user_agent)
+        if not entry:
+            return None
+        token, fetched_at = entry
+        if _time.monotonic() - fetched_at > _VQD_TTL_SEC:
+            _vqd_cache.pop(user_agent, None)
+            return None
+        return token
+
+
+def store_vqd(user_agent: str, token: str) -> None:
+    with _vqd_lock:
+        _vqd_cache[user_agent] = (token, _time.monotonic())
+
+
+# ---------------------------------------------------------------------------
 # Bounded response read
 # ---------------------------------------------------------------------------
 
@@ -347,39 +383,42 @@ class DuckDuckGoChat(Provider):
         model = random.choice(self.MODELS)
         ua = random.choice(BROWSER_UAS)
 
-        # Step 1: fetch VQD challenge token. DDG has tweaked this header
-        # name a few times ("x-vqd-4", "x-vqd-hash-1"); we just grab
-        # whatever looks like one.
-        status_headers = {
-            "User-Agent": ua,
-            "Accept": "*/*",
-            "x-vqd-accept": "1",
-            "Cache-Control": "no-store",
-        }
-        try:
-            s = await client.get(self.STATUS_URL, headers=status_headers)
-        except httpx.HTTPError as e:
-            return ProviderResult(
-                name=self.name,
-                category=self.category,
-                method="GET",
-                url=self.STATUS_URL,
-                status_code=None,
-                ok=False,
-                error=f"status handshake failed: {type(e).__name__}: {e}",
-            )
-
-        vqd = s.headers.get("x-vqd-4") or s.headers.get("x-vqd-hash-1")
+        # Step 1: VQD challenge token. Per-UA cache avoids the
+        # preflight GET on every fire (token is good for several
+        # minutes); on cache miss, fetch a fresh one.
+        vqd = cached_vqd(ua)
         if not vqd:
-            return ProviderResult(
-                name=self.name,
-                category=self.category,
-                method="GET",
-                url=self.STATUS_URL,
-                status_code=s.status_code,
-                ok=False,
-                error="no vqd token in status response",
-            )
+            status_headers = {
+                "User-Agent": ua,
+                "Accept": "*/*",
+                "x-vqd-accept": "1",
+                "Cache-Control": "no-store",
+            }
+            try:
+                s = await client.get(self.STATUS_URL, headers=status_headers)
+            except httpx.HTTPError as e:
+                return ProviderResult(
+                    name=self.name,
+                    category=self.category,
+                    method="GET",
+                    url=self.STATUS_URL,
+                    status_code=None,
+                    ok=False,
+                    error=f"status handshake failed: {type(e).__name__}: {e}",
+                )
+
+            vqd = s.headers.get("x-vqd-4") or s.headers.get("x-vqd-hash-1")
+            if not vqd:
+                return ProviderResult(
+                    name=self.name,
+                    category=self.category,
+                    method="GET",
+                    url=self.STATUS_URL,
+                    status_code=s.status_code,
+                    ok=False,
+                    error="no vqd token in status response",
+                )
+            store_vqd(ua, vqd)
 
         # Step 2: chat POST.
         chat_headers = {
@@ -470,8 +509,10 @@ class MCPAuthedProbe(Provider):
                 url=self.url,
                 status_code=None,
                 ok=False,
-                error=f"no API key saved for {self._server['provider']} "
-                      f"(see {self._server['signup_url']})",
+                error=(f"no API key saved for "
+                       f"{self._server.get('provider', '?')}"
+                       + (f" (see {self._server['signup_url']})"
+                          if self._server.get("signup_url") else "")),
             )
 
         headers = _mcp.headers_for_keyed(self._server, api_key)

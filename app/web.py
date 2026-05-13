@@ -206,12 +206,27 @@ def create_app(
 
         applied = await state.update_config(body)
         # Normalize for JSON (set → sorted list).
+        normalized = {
+            k: sorted(v) if isinstance(v, set) else v
+            for k, v in applied.items()
+        }
+        # Broadcast a config-changed event so SSE-subscribed clients
+        # (the dashboard, etc.) can refresh their views without polling.
+        if normalized:
+            state.publish_result({
+                "target":   "config",
+                "category": "system",
+                "method":   "PATCH",
+                "url":      "/api/config",
+                "status":   200,
+                "ok":       True,
+                "source":   "config-change",
+                "snippet":  "config updated: "
+                            + ", ".join(sorted(normalized.keys())),
+            })
         return JSONResponse({
-            "applied": {
-                k: sorted(v) if isinstance(v, set) else v
-                for k, v in applied.items()
-            },
-            "config": _config_to_dict(state.config),
+            "applied": normalized,
+            "config":  _config_to_dict(state.config),
         })
 
     # ------------------ Targets ------------------
@@ -287,6 +302,12 @@ def create_app(
         state.begin_fire_all(
             total=total, source=source, concurrency=concurrency,
         )
+        # Snapshot the cancel event ONCE. begin_fire_all replaces the
+        # event object on each call, so re-resolving inside the loop
+        # would risk waiting on a fresh event after the cancelled one
+        # was already set. Holding the reference keeps the wait
+        # consistent with whatever begin_fire_all() just installed.
+        cancel_evt = state.fire_all_cancel_event()
         log.info(
             "fire_all_started",
             total=total, concurrency=concurrency, source=source,
@@ -295,7 +316,7 @@ def create_app(
         async def _one(provider) -> None:
             nonlocal completed
             async with sem:
-                if state.fire_all_cancel_requested():
+                if cancel_evt.is_set():
                     return
                 state.update_fire_all_current(provider.name)
                 await run_and_publish(provider, client, state, source=source)
@@ -305,7 +326,7 @@ def create_app(
         tasks: list[asyncio.Task] = []
         try:
             for provider in targets:
-                if state.fire_all_cancel_requested():
+                if cancel_evt.is_set():
                     log.info(
                         "fire_all_cancelled_before_launch",
                         launched=launched, total=total,
@@ -318,9 +339,7 @@ def create_app(
                 if launched < total:
                     gap = rng.uniform(gap_min, gap_max)
                     try:
-                        await asyncio.wait_for(
-                            state.fire_all_cancel_event().wait(), timeout=gap
-                        )
+                        await asyncio.wait_for(cancel_evt.wait(), timeout=gap)
                     except asyncio.TimeoutError:
                         pass
 
@@ -584,7 +603,10 @@ def create_app(
             return False, 0, f"could not persist catalog: {e}"
         return True, len(models), None
 
-    async def keys_summary(request: Request) -> Response:
+    async def _keys_summary_payload() -> dict[str, Any]:
+        """Build the keys-summary dict. Factored out so keys_set /
+        keys_refresh can mutate it directly instead of round-tripping
+        through json.loads(JSONResponse.body)."""
         summary = await key_store.summary()
         mcp_summary = await key_store.mcp_summary()
         providers = [
@@ -620,11 +642,14 @@ def create_app(
                 "signup_url": s["signup_url"],
                 "kind":       "mcp",
                 "url":        s["url"],
-                "scope_hint": s["scope_hint"],
+                "scope_hint": s.get("scope_hint", ""),
                 "present":    bool(mcp_entry.get("present")),
                 "preview":    mcp_entry.get("preview"),
             })
-        return JSONResponse({"providers": providers, "path": summary["path"]})
+        return {"providers": providers, "path": summary["path"]}
+
+    async def keys_summary(request: Request) -> Response:
+        return JSONResponse(await _keys_summary_payload())
 
     async def keys_set(request: Request) -> Response:
         provider = request.path_params["provider"]
@@ -656,8 +681,7 @@ def create_app(
                     status_code=500,
                 )
             log.info("mcp_key_set", provider=provider)
-            summary_resp = await keys_summary(request)
-            return summary_resp
+            return JSONResponse(await _keys_summary_payload())
 
         # AI providers: existing flow with discovery.
         try:
@@ -680,8 +704,7 @@ def create_app(
 
         # Return the updated summary plus a discovery outcome hint so
         # the UI can show a toast if needed.
-        summary_resp = await keys_summary(request)
-        summary_body = json.loads(summary_resp.body)
+        summary_body = await _keys_summary_payload()
         summary_body["discovery"] = {
             "provider":    provider,
             "ok":          discovered_ok,
@@ -710,8 +733,7 @@ def create_app(
                  provider=provider, ok=discovered_ok,
                  model_count=count, err=err)
 
-        summary_resp = await keys_summary(request)
-        summary_body = json.loads(summary_resp.body)
+        summary_body = await _keys_summary_payload()
         summary_body["discovery"] = {
             "provider":    provider,
             "ok":          discovered_ok,
@@ -739,7 +761,7 @@ def create_app(
                 {"error": f"could not delete key: {e}"},
                 status_code=500,
             )
-        return await keys_summary(request)
+        return JSONResponse(await _keys_summary_payload())
 
     async def prompt_extract(request: Request) -> Response:
         """Accept a multipart upload, extract text, return it inline.

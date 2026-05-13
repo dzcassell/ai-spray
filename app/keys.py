@@ -334,18 +334,30 @@ class KeyStore:
         return self._mcp_keys.get(provider)
 
     async def mcp_set(self, provider: str, key: str) -> None:
+        # Mirror the validation that set() does — non-empty string,
+        # non-empty provider slug — so a buggy caller can't quietly
+        # write an empty token. Both fields are required.
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError("provider must be a non-empty string")
+        key = (key or "").strip()
+        if not key:
+            raise ValueError("key must be a non-empty string")
         async with self._lock:
             await self._ensure_loaded_locked()
-            self._mcp_keys[provider] = key.strip()
+            self._mcp_keys[provider] = key
             await self._save_locked()
+        log.info("saved mcp key for provider %s", provider)
 
     async def mcp_delete(self, provider: str) -> bool:
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError("provider must be a non-empty string")
         async with self._lock:
             await self._ensure_loaded_locked()
             existed = provider in self._mcp_keys
             self._mcp_keys.pop(provider, None)
             if existed:
                 await self._save_locked()
+                log.info("deleted mcp key for provider %s", provider)
             return existed
 
     # ------------------------------------------------------------------

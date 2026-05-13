@@ -341,17 +341,25 @@ async def _main_async() -> int:
         stop.set()
         server.should_exit = True
 
+        # Track whether any non-shutdown task crashed. If the
+        # scheduler loop or HTTP server died unexpectedly, exit
+        # non-zero so docker / systemd restarts the container —
+        # otherwise we'd silently keep running with a dead worker.
+        exit_code = 0
         for t in pending:
             t.cancel()
         for t in (*done, *pending):
             try:
                 await t
-            except (asyncio.CancelledError, Exception) as e:
-                if not isinstance(e, asyncio.CancelledError):
-                    log.warning("task_exited", task=t.get_name(), error=str(e))
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                log.error("task_exited", task=t.get_name(), error=str(e))
+                if t.get_name() != "shutdown-watcher":
+                    exit_code = 1
 
-    log.info("shutdown_complete")
-    return 0
+    log.info("shutdown_complete", exit_code=exit_code)
+    return exit_code
 
 
 def main() -> None:
