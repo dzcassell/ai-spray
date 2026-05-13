@@ -1,0 +1,35 @@
+# Overlay that switches the hairspray service onto the agentic image.
+#
+# Use:
+#   docker compose -f docker-compose.yml -f docker-compose.agentic.yml \
+#       up -d --build
+#
+# Requires hairspray:latest to exist first (built by docker-compose.yml).
+# This overlay then builds hairspray:agentic on top and points the
+# service at it.
+
+services:
+  hairspray:
+    image: hairspray:agentic
+    build:
+      context: .
+      dockerfile: Dockerfile.agentic
+    environment:
+      # Daily token budget across all agentic fires. The loop refuses
+      # to launch a new fire when the running total of input+output
+      # tokens (from the CLI's stream-json usage block) exceeds this
+      # cap. Resets at boot and at midnight UTC.
+      AGENTIC_DAILY_TOKEN_BUDGET: ${AGENTIC_DAILY_TOKEN_BUDGET:-500000}
+      # Minimum gap between agentic fires. Agentic runs are roughly
+      # 6x the cost of a one-shot completion (multi-turn + tools),
+      # so the floor is set well above the scheduler's general
+      # MIN_INTERVAL_SEC. UI may set a higher value but not lower.
+      AGENTIC_MIN_GAP_SEC: ${AGENTIC_MIN_GAP_SEC:-300}
+      # Hard-disable Claude Code self-update inside the container.
+      DISABLE_AUTOUPDATER: "1"
+    tmpfs:
+      # Wipe the agent's working dir on every container start so
+      # accumulated junk from past fires never bleeds into a new
+      # run. 64 MB is plenty for the kinds of small files our
+      # prompt library asks the agent to create.
+      - /tmp/agent-sandbox:size=64m,uid=10001,gid=10001,mode=0700

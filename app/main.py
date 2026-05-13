@@ -108,6 +108,12 @@ def _resolve_tls_verify(cfg: Config, log_) -> "bool | str":
             # aiohttp) sees the same trust anchors as httpx does.
             os.environ["SSL_CERT_FILE"] = COMBINED_BUNDLE_PATH
             os.environ["REQUESTS_CA_BUNDLE"] = COMBINED_BUNDLE_PATH
+            # Node-based CLIs (Claude Code, gemini-cli, codex, etc.)
+            # ignore the OpenSSL envs above and use Node's own bundle.
+            # NODE_EXTRA_CA_CERTS is the official knob for adding a
+            # private CA without replacing the bundle; required for
+            # any baked-in agentic CLI to trust a SASE re-sign fabric.
+            os.environ["NODE_EXTRA_CA_CERTS"] = COMBINED_BUNDLE_PATH
             log_.info(
                 "tls_custom_ca",
                 mode="custom-bundle",

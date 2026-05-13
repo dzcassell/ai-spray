@@ -1,0 +1,68 @@
+# hAIrspray — agentic variant
+#
+# Extends the lean hairspray:latest image with real LLM-agent CLIs
+# baked in. The scheduler can then drive *agentic* fires that
+# generate the kind of mixed traffic SASE app-ID engines actually
+# face in production: model API calls plus file I/O, shell execution,
+# and web fetches — all signed with the CLI's real wire signature.
+#
+# Why a separate image?
+#   * +80-120 MB for Node + Claude Code + aider. Operators who only
+#     want network probing should not pay that cost.
+#   * Real LLM clients with real tool access are a different blast
+#     radius — keeping them opt-in keeps the lean image safe by
+#     default.
+#
+# Build & run:
+#   docker compose -f docker-compose.yml -f docker-compose.agentic.yml \
+#       build
+#   docker compose -f docker-compose.yml -f docker-compose.agentic.yml \
+#       up -d
+#
+# Egress: agentic fires call api.anthropic.com (Claude Code) and
+# whichever model backend aider is configured for. They will also
+# call WebFetch URLs the prompt mentions, so SASE sees real
+# heterogeneous AI-class traffic.
+
+FROM hairspray:latest AS agentic
+
+USER root
+
+# curl is needed for the Claude Code installer. ca-certificates
+# is already present on hairspray:latest but reinstall to be sure
+# the layer cache survives base-image refreshes.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# aider — pure Python, smallest second-agent footprint. Reuses the
+# existing Python interpreter so no Node duplication.
+RUN pip install --no-cache-dir aider-chat==0.65.0
+
+# Pre-create the agent sandbox dir and own it as the runtime user.
+# Compose mounts a tmpfs over this at run time so each container
+# restart starts clean.
+RUN mkdir -p /tmp/agent-sandbox \
+ && chown simulator:simulator /tmp/agent-sandbox \
+ && chmod 0700 /tmp/agent-sandbox
+
+USER simulator
+
+# Disable Claude Code's self-update on every invocation. Without
+# this the binary mutates between fires — wire signatures shift,
+# image becomes non-reproducible.
+ENV DISABLE_AUTOUPDATER=1 \
+    CLAUDE_CODE_USE_BEDROCK=0 \
+    PATH=/home/simulator/.local/bin:$PATH
+
+# Official Claude Code installer lands a self-contained Node + the
+# CLI bundle in ~/.local/share/claude. Smaller than installing
+# system Node + npm package, and pinned to the version Anthropic
+# tests against.
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Sanity check at build time — fail the build early if the binary
+# isn't on PATH where the scheduler expects it.
+RUN claude --version || (echo "claude CLI missing after install" && exit 1)
