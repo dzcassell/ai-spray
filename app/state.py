@@ -238,8 +238,18 @@ class AppState:
         cat = event.get("category", "unknown")
         name = event.get("target", "unknown")
         self.per_category[cat] = self.per_category.get(cat, 0) + 1
-        self.per_target_count[name] = self.per_target_count.get(name, 0) + 1
-        self.per_target_last_status[name] = event.get("status")
+        # Prompt mode and profile-test mode publish compound labels
+        # (e.g. "ProfileTest · CC# · echo · Pollinations-Text · openai")
+        # that produce a new per_target_count key on every run. Bucket
+        # anything that isn't a registered provider into "<other>" so
+        # the counters dict stays bounded over long-running sessions.
+        bucket = name if name in self._providers else "<other>"
+        self.per_target_count[bucket] = self.per_target_count.get(bucket, 0) + 1
+        # last_status is per-registered-provider; compound labels from
+        # prompt/profile-test mode would just bloat this dict without
+        # ever being read back via targets_snapshot.
+        if name in self._providers:
+            self.per_target_last_status[name] = event.get("status")
 
         stamped = {"ts": self.last_tick_at, **event}
         self._buffer.append(stamped)
