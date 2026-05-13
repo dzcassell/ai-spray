@@ -298,35 +298,81 @@ populate the whole panel from scratch on a fresh Gmail account:
 roughly 20–30 minutes, most of which is clicking through sign-up
 flows rather than anything hAIrspray-specific.
 
-## Optional: install the real Claude CLI for the Agents tab
+## Optional: agentic variant (Claude Code CLI + aider baked in)
 
-The Agents tab will fire prompts at Anthropic via the API by default
-(`claude-cli` User-Agent on a `/v1/messages` POST). If you'd rather
-have the *real* `claude` binary in the container — same wire shape
-the Anthropic Claude Code CLI emits in its day-job — install it in
-your derived image:
+The lean image fires Anthropic prompts via the API with a
+`claude-cli` User-Agent. If you want the *real* Claude Code binary
+in the container — same wire shape Anthropic's CLI emits in its
+day-job, plus actual multi-turn tool use (Read/Write/Bash/WebFetch)
+producing the heterogeneous traffic real agentic clients generate —
+use the prebuilt `Dockerfile.agentic` variant:
 
-```dockerfile
-# In a Dockerfile that FROM's hAIrspray:
-RUN apt-get update && apt-get install -y nodejs npm && \
-    npm install -g @anthropic-ai/claude-code && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+```bash
+docker compose -f docker-compose.yml -f docker-compose.agentic.yml up -d --build
 ```
 
-At startup, hAIrspray runs `shutil.which("claude")` once. If it
-finds the binary on PATH, the Agents tab's Anthropic checkbox
-shows `(real CLI)` next to it and fires invoke `claude -p "..."`
-as a subprocess. Without the binary the checkbox shows `(api)`
-and fires go to the API directly. Either way the SASE/NGFW
-classification target is the same.
+This builds `hairspray:agentic` (~250 MB; +100 MB over the lean
+image) with Claude Code installed via the official `claude.ai/install.sh`
+script, `aider-chat` via pip, `DISABLE_AUTOUPDATER=1` so the wire
+signature stays stable, and a 64 MB tmpfs at `/tmp/agent-sandbox`
+as the agent's working directory (wiped per container restart).
 
-The Cursor binary is deliberately **not** supported as a
-subprocess path. `cursor-agent` auto-updates aggressively on every
-launch, which generates noisy classifiable traffic of its own and
+In the Agents tab, the **Agentic / Tool use** toggle becomes
+operable. With it on:
+
+* Anthropic fires use `claude -p '<prompt>' --max-turns 6
+  --allowed-tools '<allowlist>' --permission-mode acceptEdits
+  --output-format stream-json` against the sandbox.
+* The stream-json output is parsed for tool-use events and final
+  usage. Each fire's card in the UI shows a tool-call timeline
+  (Bash/Read/Write/WebFetch with arg summaries and elapsed-ms),
+  turn count, in/out tokens, and the USD cost when Claude Code
+  reports it.
+* A daily token budget (`AGENTIC_DAILY_TOKEN_BUDGET`, default 500k)
+  is enforced — fires that would exceed the cap downgrade to chat
+  mode rather than blocking the loop. Counter resets at UTC midnight.
+* The agentic min-gap floor (`AGENTIC_MIN_GAP_SEC`, default 300s)
+  overrides chat-mode pacing because multi-turn runs are ~6× the
+  one-shot spend.
+
+The Cursor binary is deliberately **not** installed. `cursor-agent`
+auto-updates on every launch, which generates noisy traffic and
 breaks predictable container behavior. If you want to test that
-pattern specifically, install Cursor on your dev workstation
-behind the same fabric and let it update there — hAIrspray won't
-get in the way.
+specifically, install Cursor on a dev workstation behind the same
+fabric and let it update there.
+
+## Optional: inbound MCP responder
+
+Set `MCP_RESPONDER_ENABLED=true` in `.env` and hAIrspray will *also*
+answer inbound MCP requests at:
+
+* `POST /mcp-responder/streamable`   — Streamable HTTP transport
+* `POST /mcp-responder/sse/messages` — legacy HTTP+SSE write half
+* `GET  /mcp-responder/sse`          — legacy HTTP+SSE read half
+* `DELETE /mcp-responder/streamable` — session termination
+
+Two test cases this unlocks:
+
+1. **Inbound classification.** Point a real Claude Code / Cursor /
+   Goose client at `https://<host>/mcp-responder/streamable` and
+   observe whether the SASE fabric flags the inbound connection as
+   MCP. Useful for shadow-MCP detection rules.
+
+2. **DLP egress against a controllable peer.** Wire a real MCP
+   client to the responder, send `tools/call` invocations with
+   synthetic PII in the arguments. The responder echoes the
+   received arguments back as the tool result, so you have a
+   ground-truth view of what crossed the wire — compare against
+   what your fabric's DLP engine reported.
+
+Every inbound message publishes into the existing event ring
+buffer with `category=mcp_responder`, so they appear alongside
+outbound probes in the live log. The header shows an **MCP RESPONDER**
+chip while it's live.
+
+**Security**: the responder has **no authentication**. Run it
+inside a trusted network segment, or front it with your own auth
+proxy. Default is off.
 
 ## Typical SASE/NGFW test workflow
 
