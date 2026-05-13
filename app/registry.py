@@ -507,7 +507,7 @@ def _real_response_providers() -> list[Provider]:
 # Accept header for each transport.
 
 def _mcp_synthetic_probes() -> list[Provider]:
-    """17 MCP probes spanning methods, transports, and destinations."""
+    """MCP probes spanning methods, transports, and destinations."""
     probes: list[Provider] = []
 
     # Realistic UA strings — these match what current MCP SDKs emit.
@@ -515,18 +515,37 @@ def _mcp_synthetic_probes() -> list[Provider]:
     UA_TS_SDK     = "@modelcontextprotocol/sdk/1.0.4"
     UA_INSPECTOR  = "modelcontextprotocol-inspector/0.4.0"
 
+    def _streamable_headers() -> dict[str, str]:
+        # New header set per call so MCP-Protocol-Version rotates and
+        # Mcp-Session-Id gets a fresh UUID each fire.
+        return mcp.headers_for(
+            "streamable",
+            session_id=mcp.synthetic_session_id(),
+        )
+
     # ---- (1) Reflector targets — payload-shape classification ----
-    # Six methods × 2 reflectors = 12 probes? Too many. Cover all
-    # six methods on httpbin (the canonical reflector), then a
-    # couple variants on postman-echo for redundancy.
+    # Each method gets one probe against the canonical reflector so
+    # SASE can classify on body shape with no destination hint.
 
     method_builders = [
-        ("initialize",              mcp.build_initialize_request),
-        ("tools/list",              mcp.build_tools_list_request),
-        ("tools/call",              mcp.random_tool_call_body),
-        ("resources/read",          lambda: mcp.build_resources_read_request("file:///etc/hosts")),
-        ("prompts/get",             lambda: mcp.build_prompts_get_request("summarize")),
+        ("initialize",                mcp.build_initialize_request),
+        ("tools/list",                mcp.build_tools_list_request),
+        ("tools/call",                mcp.random_tool_call_body),
+        ("resources/read",            lambda: mcp.build_resources_read_request("file:///etc/hosts")),
+        ("prompts/get",               lambda: mcp.build_prompts_get_request("summarize")),
         ("notifications/initialized", mcp.build_initialized_notification),
+        # New in Stage 3: extended method coverage. Each adds a
+        # distinct on-the-wire fingerprint a classifier might key on.
+        ("ping",                       mcp.build_ping_request),
+        ("roots/list",                 mcp.build_roots_list_request),
+        ("logging/setLevel",           mcp.build_logging_set_level_request),
+        ("completion/complete",        mcp.build_completion_complete_request),
+        ("sampling/createMessage",     lambda: mcp.build_sampling_create_message_request("Summarize this.")),
+        ("elicitation/elicit",         mcp.build_elicitation_elicit_request),
+        ("notifications/progress",     mcp.build_progress_notification),
+        ("notifications/cancelled",    mcp.build_cancelled_notification),
+        ("notifications/resources/updated", mcp.build_resources_updated_notification),
+        ("notifications/tools/list_changed", mcp.build_tools_list_changed_notification),
     ]
 
     for method, builder in method_builders:
@@ -536,7 +555,7 @@ def _mcp_synthetic_probes() -> list[Provider]:
             user_agent=UA_PYTHON_SDK,
             category="mcp_synthetic",
             body_builder=lambda _p, b=builder: b(),
-            extra_headers=mcp.headers_for("streamable"),
+            extra_headers=_streamable_headers(),
             send_fake_auth=False,
         ))
 
@@ -552,38 +571,52 @@ def _mcp_synthetic_probes() -> list[Provider]:
         send_fake_auth=False,
     ))
 
+    # JSON-RPC batched request (2025-03-26 spec window). Some clients
+    # pinned to that version still emit batches; the shape is
+    # distinctive (top-level array).
+    probes.append(ApiProbe(
+        name="MCP synthetic (batch: init + tools/list + tools/call)",
+        url="https://httpbin.org/post",
+        user_agent=UA_TS_SDK,
+        category="mcp_synthetic",
+        body_builder=lambda _p: mcp.build_batch(
+            mcp.build_initialize_request(protocol_version="2025-03-26"),
+            mcp.build_tools_list_request(),
+            mcp.random_tool_call_body(),
+        ),
+        extra_headers=mcp.headers_for("streamable", protocol_version="2025-03-26"),
+        send_fake_auth=False,
+    ))
+
     # ---- (2) Real public MCP server hostnames, unauthenticated ----
-    # Pick a representative slice of the registry: the four most
-    # widely-recognized hosts (GitHub, Cloudflare, Notion, Linear)
-    # plus a few more so SASE has variety to classify against.
+    # Derive directly from PUBLIC_MCP_SERVERS so adding/removing a
+    # destination in mcp.py automatically flows through to the
+    # registry without a second list to maintain.
 
-    unauth_targets = [
-        ("GitHub MCP",          "https://api.githubcopilot.com/mcp",       "streamable", UA_PYTHON_SDK),
-        ("Cloudflare Docs MCP", "https://docs.mcp.cloudflare.com/sse",     "streamable", UA_TS_SDK),
-        ("Notion MCP",          "https://mcp.notion.com/mcp",              "streamable", UA_PYTHON_SDK),
-        ("Linear MCP",          "https://mcp.linear.app/sse",              "sse-legacy", UA_TS_SDK),
-        ("Atlassian MCP",       "https://mcp.atlassian.com/v1/sse",        "sse-legacy", UA_INSPECTOR),
-        ("Sentry MCP",          "https://mcp.sentry.dev/mcp",              "streamable", UA_PYTHON_SDK),
-        ("Asana MCP",           "https://mcp.asana.com/sse",               "sse-legacy", UA_TS_SDK),
-        ("Stripe MCP",          "https://mcp.stripe.com/v1",               "streamable", UA_PYTHON_SDK),
-        ("Square MCP",          "https://mcp.squareup.com/sse",            "streamable", UA_TS_SDK),
-        ("Block MCP (Goose)",   "https://mcp.block.xyz/sse",               "sse-legacy", UA_TS_SDK),
-    ]
+    def _ua_for(host: str) -> str:
+        # Inspector and TS SDK alternation gives the classifier
+        # variety without overweighting any one UA.
+        if "cloudflare" in host or "github" in host:
+            return UA_PYTHON_SDK
+        if "atlassian" in host or "deepwiki" in host:
+            return UA_INSPECTOR
+        return UA_TS_SDK
 
-    for name, url, transport, ua in unauth_targets:
-        probes.append(ApiProbe(
-            name=name,
-            url=url,
-            user_agent=ua,
-            category="mcp_synthetic",
-            # initialize is the universal first-message — what every
-            # MCP client sends on session start. Most likely to
-            # produce a classifiable signature, even if the server
-            # immediately 401s for missing auth.
-            body_builder=lambda _p: mcp.build_initialize_request(),
-            extra_headers=mcp.headers_for(transport),
-            send_fake_auth=False,
-        ))
+    for srv in mcp.PUBLIC_MCP_SERVERS:
+        if srv.get("streamable_url"):
+            probes.append(ApiProbe(
+                name=srv["name"],
+                url=srv["streamable_url"],
+                user_agent=_ua_for(srv["host"]),
+                category="mcp_synthetic",
+                # initialize is the universal first-message — what every
+                # MCP client sends on session start. Most likely to
+                # produce a classifiable signature, even if the server
+                # immediately 401s for missing auth.
+                body_builder=lambda _p: mcp.build_initialize_request(),
+                extra_headers=_streamable_headers(),
+                send_fake_auth=False,
+            ))
 
     return probes
 

@@ -514,6 +514,18 @@ PUBLIC_MCP_SERVERS: list[dict[str, Any]] = [
         "sse_url": "https://docs.mcp.cloudflare.com/sse",
     },
     {
+        "name": "Cloudflare Radar MCP",
+        "host": "radar.mcp.cloudflare.com",
+        "streamable_url": "https://radar.mcp.cloudflare.com/mcp",
+        "sse_url": "https://radar.mcp.cloudflare.com/sse",
+    },
+    {
+        "name": "Cloudflare Observability MCP",
+        "host": "observability.mcp.cloudflare.com",
+        "streamable_url": "https://observability.mcp.cloudflare.com/mcp",
+        "sse_url": "https://observability.mcp.cloudflare.com/sse",
+    },
+    {
         "name": "Notion MCP",
         "host": "mcp.notion.com",
         "streamable_url": "https://mcp.notion.com/mcp",
@@ -566,6 +578,79 @@ PUBLIC_MCP_SERVERS: list[dict[str, Any]] = [
         "host": "mcp.block.xyz",
         "streamable_url": "https://mcp.block.xyz/sse",
         "sse_url": "https://mcp.block.xyz/sse",
+    },
+    # ---------- Expanded set: SaaS and infra MCP servers ----------
+    {
+        "name": "Zapier MCP",
+        "host": "mcp.zapier.com",
+        "streamable_url": "https://mcp.zapier.com/api/mcp/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Vercel MCP",
+        "host": "mcp.vercel.com",
+        "streamable_url": "https://mcp.vercel.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Supabase MCP",
+        "host": "mcp.supabase.com",
+        "streamable_url": "https://mcp.supabase.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Neon MCP",
+        "host": "mcp.neon.tech",
+        "streamable_url": "https://mcp.neon.tech/mcp",
+        "sse_url": "https://mcp.neon.tech/sse",
+    },
+    {
+        "name": "Render MCP",
+        "host": "mcp.render.com",
+        "streamable_url": "https://mcp.render.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "DeepWiki MCP",
+        "host": "mcp.deepwiki.com",
+        "streamable_url": "https://mcp.deepwiki.com/mcp",
+        "sse_url": "https://mcp.deepwiki.com/sse",
+    },
+    {
+        "name": "Intercom MCP",
+        "host": "mcp.intercom.com",
+        "streamable_url": "https://mcp.intercom.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "PagerDuty MCP",
+        "host": "mcp.pagerduty.com",
+        "streamable_url": "https://mcp.pagerduty.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "HubSpot MCP",
+        "host": "app.hubspot.com",
+        "streamable_url": "https://app.hubspot.com/mcp/v1/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Wix MCP",
+        "host": "mcp.wix.com",
+        "streamable_url": "https://mcp.wix.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Webflow MCP",
+        "host": "mcp.webflow.com",
+        "streamable_url": "https://mcp.webflow.com/mcp",
+        "sse_url": None,
+    },
+    {
+        "name": "Plaid MCP",
+        "host": "api.dashboard.plaid.com",
+        "streamable_url": "https://api.dashboard.plaid.com/mcp/mcp",
+        "sse_url": "https://api.dashboard.plaid.com/mcp/sse",
     },
 ]
 
