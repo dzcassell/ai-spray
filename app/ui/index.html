@@ -1815,6 +1815,9 @@
   </div>
   <span class="grow"></span>
   <span id="status-pill" class="pill paused"><span class="dot"></span><span class="label">PAUSED</span></span>
+  <span id="tls-pill" class="pill dead" hidden title="TLS certificate verification is OFF. Mount your SASE re-sign CA into ./certs/ and restart for verified inspection. See CERT HELP.">
+    <span class="dot"></span><span class="label">TLS BYPASS</span>
+  </span>
   <button id="pause-btn" class="btn">Pause</button>
   <button id="cert-help-btn" class="btn cert-help-btn" type="button" title="Installing your SASE re-sign CA">CERT HELP</button>
   <div class="readouts">
@@ -2463,6 +2466,14 @@ function renderStats() {
   $("#uptime").textContent =
     "uptime: " + fmtHms(S.stats.uptime_seconds) +
     " · " + S.stats.enabled_targets + "/" + S.stats.total_targets + " targets";
+
+  // TLS mode chip: only loud when verification is OFF. custom-bundle
+  // (CA mounted, full verify) and system (verify on, no extras) are
+  // both fine and stay hidden to keep the header uncluttered.
+  const tlsPill = $("#tls-pill");
+  if (tlsPill) {
+    tlsPill.hidden = S.stats.tls_mode !== "bypass";
+  }
 
   $("#tick-age").textContent =
     S.stats.last_tick_seconds_ago == null
