@@ -979,11 +979,17 @@ def create_app(
                 if i < len(entries) - 1:
                     await asyncio.sleep(_r.uniform(0.4, 0.9))
 
+        # Hoisted so gen() can cancel inner host_tasks on client
+        # disconnect — otherwise cancelling orch leaves the gather()
+        # to complete naturally and live HTTP requests outlive the
+        # response.
+        host_tasks: list[asyncio.Task] = []
+
         async def _orchestrate() -> None:
-            host_tasks = [
+            host_tasks.extend(
                 asyncio.create_task(_host_queue(entries))
                 for entries in by_host.values()
-            ]
+            )
             try:
                 await asyncio.gather(*host_tasks, return_exceptions=True)
             finally:
@@ -1019,10 +1025,12 @@ def create_app(
                 # Final end event.
                 yield b"data: {\"kind\":\"end\"}\n\n"
             finally:
+                for t in host_tasks:
+                    t.cancel()
                 orch.cancel()
                 try:
-                    await orch
-                except (asyncio.CancelledError, Exception):
+                    await asyncio.gather(*host_tasks, orch, return_exceptions=True)
+                except Exception:
                     pass
 
         return StreamingResponse(
