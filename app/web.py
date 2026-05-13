@@ -1401,15 +1401,6 @@ def create_app(
         loop_state.task = None
         return JSONResponse({"ok": True, "status": loop_state.status()})
 
-    # ------------------ Startup / shutdown ------------------
-
-    async def on_startup() -> None:
-        # Preload keys so the first prompt-run doesn't pay a disk
-        # round-trip and so a corrupt keys.json is caught at boot.
-        await key_store.load()
-        loaded = (await key_store.summary())["providers"]
-        log.info("key_store_loaded", count=len(loaded))
-
     routes = [
         Route("/", index),
         Route("/healthz", healthz),
@@ -1443,4 +1434,4 @@ def create_app(
         Route("/api/agents/stop",    agents_stop,  methods=["POST"]),
     ]
 
-    return Starlette(debug=False, routes=routes, on_startup=[on_startup])
+    return Starlette(debug=False, routes=routes)

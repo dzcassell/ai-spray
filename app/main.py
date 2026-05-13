@@ -244,6 +244,11 @@ async def _main_async() -> int:
     # cache coherence headaches.
     from .keys import KeyStore
     key_store = KeyStore()
+    # Load eagerly so a corrupt keys.json is caught at boot instead of
+    # surfacing on the first write. Starlette's on_startup hook is not
+    # reliable here because uvicorn runs with lifespan='off'.
+    await key_store.load()
+    log.info("key_store_loaded", count=len((await key_store.summary())["providers"]))
     providers = build_registry(key_store=key_store)
 
     stop = asyncio.Event()
