@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 
-from .providers import BROWSER_UAS
+from .providers import BROWSER_UAS, stream_read_capped
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +589,11 @@ async def _run_duckduckgo(
         )
 
     try:
-        r = await client.post(
-            CHAT_URL,
+        # 256 KiB caps the DDG SSE body — chat completions are
+        # typically well under 16 KiB; anything larger is either a
+        # runaway stream or a misbehaving upstream.
+        status, hdr, raw_text, _ = await stream_read_capped(
+            client, "POST", CHAT_URL,
             headers={
                 "User-Agent": ua,
                 "Accept": "text/event-stream",
@@ -607,14 +610,14 @@ async def _run_duckduckgo(
     except httpx.HTTPError as e:
         return err(f"chat post failed: {type(e).__name__}: {e}")
 
-    body = _parse_ddg_stream(r.text) if r.status_code == 200 else None
+    body = _parse_ddg_stream(raw_text) if status == 200 else None
     return PromptResult(
         target_id=tid, provider="duckduckgo", model=model,
         kind="text", label=label,
-        ok=r.status_code == 200, status=r.status_code,
+        ok=status == 200, status=status,
         latency_ms=int((time.monotonic() - started) * 1000),
         url=CHAT_URL, body=_trim_text(body),
-        content_type=r.headers.get("content-type"),
+        content_type=hdr.get("content-type"),
     )
 
 

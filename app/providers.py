@@ -31,6 +31,52 @@ log = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
+# Bounded response read
+# ---------------------------------------------------------------------------
+
+# Cap on bytes we'll read from a streamed response. Pollinations and
+# DuckDuckGo can hold a long-poll open until the http_timeout fires;
+# without a byte cap, a misbehaving upstream pins memory equal to
+# whatever it can pump in that window. 256 KiB is generous for the
+# DDG SSE replies (chat completions rarely exceed ~10 KB) while still
+# refusing pathological responses.
+RESPONSE_READ_CAP_BYTES = 256 * 1024
+
+
+async def stream_read_capped(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    max_bytes: int = RESPONSE_READ_CAP_BYTES,
+    **kwargs: Any,
+) -> tuple[int, httpx.Headers, str, str]:
+    """Issue an HTTP request and read at most ``max_bytes`` of the body.
+
+    Returns ``(status_code, headers, decoded_text, final_url)``. The
+    underlying TCP connection is closed as soon as the cap is hit,
+    avoiding the unbounded-memory exposure of httpx's default behaviour
+    of buffering the entire response before returning.
+    """
+    async with client.stream(method, url, **kwargs) as r:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in r.aiter_bytes():
+            if not chunk:
+                continue
+            remaining = max_bytes - total
+            if remaining <= 0:
+                break
+            chunks.append(chunk[:remaining])
+            total += len(chunks[-1])
+            if total >= max_bytes:
+                break
+        raw = b"".join(chunks)
+        text = raw.decode("utf-8", errors="replace")
+        return r.status_code, r.headers, text, str(r.url)
+
+
+# ---------------------------------------------------------------------------
 # Realistic user-agent pools
 # ---------------------------------------------------------------------------
 
@@ -209,15 +255,18 @@ class PollinationsText(Provider):
             "Accept": "text/plain, */*",
         }
         try:
-            r = await client.get(url, headers=headers, params=params)
-            snippet = r.text[:180] if r.status_code == 200 else None
+            status, _hdr, text, final_url = await stream_read_capped(
+                client, "GET", url, headers=headers, params=params,
+                max_bytes=4096,  # snippet only needs first ~180 chars
+            )
+            snippet = text[:180] if status == 200 else None
             return ProviderResult(
                 name=f"{self.name} ({model})",
                 category=self.category,
                 method="GET",
-                url=str(r.url),
-                status_code=r.status_code,
-                ok=r.status_code == 200,
+                url=final_url,
+                status_code=status,
+                ok=status == 200,
                 response_snippet=snippet,
             )
         except httpx.HTTPError as e:
@@ -347,15 +396,19 @@ class DuckDuckGoChat(Provider):
             ],
         }
         try:
-            r = await client.post(self.CHAT_URL, headers=chat_headers, json=body)
-            snippet = r.text[:180] if r.status_code == 200 else None
+            status, _hdr, text, _url = await stream_read_capped(
+                client, "POST", self.CHAT_URL,
+                headers=chat_headers, json=body,
+                max_bytes=4096,  # snippet only needs first ~180 chars
+            )
+            snippet = text[:180] if status == 200 else None
             return ProviderResult(
                 name=f"{self.name} ({model})",
                 category=self.category,
                 method="POST",
                 url=self.CHAT_URL,
-                status_code=r.status_code,
-                ok=r.status_code == 200,
+                status_code=status,
+                ok=status == 200,
                 response_snippet=snippet,
             )
         except httpx.HTTPError as e:
