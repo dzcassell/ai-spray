@@ -1770,6 +1770,86 @@
     color: #ff8a8a;
   }
 
+  /* ---- Agentic mode additions ---- */
+  .agents-result-meta .mode-badge {
+    padding: 2px 6px;
+    border-radius: 2px;
+    font-weight: 600;
+    font-size: 10px;
+    background: var(--cat-mcp_session_sim);
+    color: #ffffff;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .agents-result-tools {
+    margin: 4px 0 6px 0;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border-left: 2px solid var(--cat-mcp_session_sim);
+    border-radius: 2px;
+    font: 500 11px var(--ff-mono);
+    color: var(--text-dim);
+  }
+  .agents-result-tools .tool-row {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    align-items: baseline;
+  }
+  .agents-result-tools .tool-row .tool-name {
+    color: var(--cat-mcp_synthetic);
+    flex: 0 0 70px;
+    font-weight: 600;
+  }
+  .agents-result-tools .tool-row .tool-args {
+    color: var(--text-dim);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agents-result-tools .tool-row .tool-elapsed {
+    color: var(--text-faint);
+    flex: 0 0 auto;
+    font-size: 10px;
+  }
+  .agents-result-cost {
+    font: 500 11px var(--ff-mono);
+    color: var(--text-faint);
+    margin: 2px 0 4px 0;
+  }
+
+  /* Agentic toggle disabled state */
+  #agents-agentic-label.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  #agents-agentic-label.disabled input { cursor: not-allowed; }
+
+  /* Daily token budget bar */
+  .agentic-budget {
+    margin: 8px 0 4px 0;
+    font: 500 11px var(--ff-mono);
+    color: var(--text-dim);
+  }
+  .agentic-budget-bar {
+    margin-top: 4px;
+    height: 6px;
+    background: var(--chassis);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .agentic-budget-fill {
+    height: 100%;
+    background: var(--cat-mcp_session_sim);
+    transition: width 200ms linear;
+    width: 0;
+  }
+  .agentic-budget.over .agentic-budget-fill {
+    background: var(--err);
+  }
+
 </style>
 </head>
 <body>
@@ -2236,6 +2316,15 @@ docker compose up -d</pre>
               Cursor <span class="fade mono">(api)</span>
             </label>
           </label>
+          <label class="profile-field" id="agents-agentic-field">
+            <span class="profile-field-label">Agentic</span>
+            <label class="agents-cb" id="agents-agentic-label"
+                   title="Run real Claude Code with tools, files, and web fetch — requires the agentic Docker variant.">
+              <input type="checkbox" id="agents-agentic-mode">
+              Tool use
+              <span class="fade mono" id="agents-agentic-hint">(needs CLI)</span>
+            </label>
+          </label>
           <span class="grow"></span>
           <button id="agents-fire" class="btn primary" type="button">
             ▶ Fire
@@ -2243,6 +2332,20 @@ docker compose up -d</pre>
           <button id="agents-stop" class="btn" type="button" hidden>
             ■ Stop
           </button>
+        </div>
+
+        <!-- Daily token budget — only meaningful when agentic mode is on,
+             but always rendered (greyed out) so operators see it exists. -->
+        <div class="agentic-budget" id="agentic-budget" hidden>
+          <span class="fade">Daily token budget:</span>
+          <span class="mono" id="agentic-budget-used">0</span>
+          <span class="fade"> / </span>
+          <span class="mono" id="agentic-budget-total">0</span>
+          <span class="fade"> tokens · resets </span>
+          <span class="mono" id="agentic-budget-resets">—</span>
+          <div class="agentic-budget-bar">
+            <div class="agentic-budget-fill" id="agentic-budget-fill"></div>
+          </div>
         </div>
 
         <!-- Prompt matrix -->
@@ -4214,6 +4317,19 @@ const AgentsUI = (() => {
         ? "(real CLI)"
         : "(api)";
     }
+    // Agentic mode is only operable when the Claude Code CLI is
+    // baked into the image (Dockerfile.agentic). Disable the
+    // toggle with a clear tooltip otherwise.
+    const agenticCb = $$("#agents-agentic-mode");
+    const agenticLabel = $$("#agents-agentic-label");
+    const agenticHint = $$("#agents-agentic-hint");
+    if (!catalog.claude_cli_available) {
+      agenticCb.disabled = true;
+      agenticLabel.classList.add("disabled");
+      agenticHint.textContent = "(needs Dockerfile.agentic)";
+    } else {
+      agenticHint.textContent = "(real CLI, max 6 turns)";
+    }
   }
 
   function bind() {
@@ -4221,6 +4337,20 @@ const AgentsUI = (() => {
     $$("#agents-stop").addEventListener("click", stop);
     $$("#agents-prompts-all").addEventListener("click", () => setAll(true));
     $$("#agents-prompts-none").addEventListener("click", () => setAll(false));
+    // Live-update agentic mode while the loop is already running —
+    // POST /api/agents/start with just the toggle value reuses the
+    // running task (it's idempotent when already running).
+    $$("#agents-agentic-mode").addEventListener("change", async (e) => {
+      if (!status.running) return;  // start() will pick it up
+      try {
+        await fetch("/api/agents/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agentic_mode: e.target.checked }),
+        });
+        await refresh();
+      } catch (err) { /* network blip — next refresh fixes the UI */ }
+    });
   }
 
   function setAll(checked) {
@@ -4289,6 +4419,7 @@ const AgentsUI = (() => {
           max_gap_sec: max_gap,
           prompts,
           providers,
+          agentic_mode: $$("#agents-agentic-mode").checked,
         }),
       });
       if (!r.ok) {
@@ -4341,6 +4472,29 @@ const AgentsUI = (() => {
     meta.textContent = `${status.total_fired} fired`;
     $$("#agents-fire").hidden = status.running;
     $$("#agents-stop").hidden = !status.running;
+
+    // Reflect agentic mode + budget meter. The DOM survives between
+    // refreshes; only update what changed.
+    const cb = $$("#agents-agentic-mode");
+    if (status.agentic_mode !== undefined && document.activeElement !== cb) {
+      cb.checked = !!status.agentic_mode;
+    }
+    const budget = $$("#agentic-budget");
+    if (status.agentic_mode) {
+      budget.hidden = false;
+      const used  = status.daily_tokens_used  || 0;
+      const total = status.daily_token_budget || 0;
+      $$("#agentic-budget-used").textContent  = used.toLocaleString();
+      $$("#agentic-budget-total").textContent = total.toLocaleString();
+      const resetTs = status.daily_tokens_reset_at;
+      $$("#agentic-budget-resets").textContent =
+        resetTs ? new Date(resetTs * 1000).toLocaleTimeString([], { hour12: false }) : "—";
+      const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+      $$("#agentic-budget-fill").style.width = pct + "%";
+      budget.classList.toggle("over", used >= total && total > 0);
+    } else {
+      budget.hidden = true;
+    }
   }
 
   function renderResults() {
@@ -4367,13 +4521,45 @@ const AgentsUI = (() => {
       r.ok ? "ok" : "fail");
     const ts = new Date(r.started_at * 1000)
       .toLocaleTimeString([], { hour12: false });
-    const meta = el("div", { class: "agents-result-meta" }, [
-      provBadge, okBadge,
+    const metaChildren = [provBadge, okBadge];
+    if (r.mode === "agentic") {
+      metaChildren.push(el("span", { class: "mode-badge" }, "agentic"));
+    }
+    metaChildren.push(
       el("span", {}, r.prompt_label),
       el("span", { class: "grow" }),
       el("span", {}, `${r.elapsed_ms}ms · ${r.response_chars} chars · ${ts}`),
-    ]);
+    );
+    const meta = el("div", { class: "agents-result-meta" }, metaChildren);
     card.appendChild(meta);
+
+    // Agentic-mode telemetry: turns + token spend + per-tool timeline.
+    if (r.mode === "agentic") {
+      const tokens = (r.input_tokens || 0) + (r.output_tokens || 0);
+      const costStr = (r.total_cost_usd && r.total_cost_usd > 0)
+        ? ` · $${r.total_cost_usd.toFixed(4)}` : "";
+      card.appendChild(el("div", { class: "agents-result-cost" },
+        `${r.num_turns || 0} turn${r.num_turns === 1 ? "" : "s"} · `
+        + `${(r.input_tokens || 0).toLocaleString()} in / `
+        + `${(r.output_tokens || 0).toLocaleString()} out tokens`
+        + costStr));
+
+      if (Array.isArray(r.tool_calls) && r.tool_calls.length > 0) {
+        const toolBox = el("div", { class: "agents-result-tools" });
+        for (const t of r.tool_calls) {
+          const row = el("div", { class: "tool-row" }, [
+            el("span", { class: "tool-name" }, t.tool || "?"),
+            el("span", { class: "tool-args", title: t.input_summary || "" },
+              t.input_summary || ""),
+            el("span", { class: "tool-elapsed" },
+              `+${(t.elapsed_ms || 0)}ms`),
+          ]);
+          toolBox.appendChild(row);
+        }
+        card.appendChild(toolBox);
+      }
+    }
+
     if (r.error) {
       card.appendChild(el("div", { class: "agents-result-prompt" },
         "error: " + r.error));
