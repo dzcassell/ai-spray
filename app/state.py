@@ -244,8 +244,11 @@ class AppState:
         stamped = {"ts": self.last_tick_at, **event}
         self._buffer.append(stamped)
 
+        # Snapshot the subscriber set before iterating: subscribe() and
+        # unsubscribe() are called from other coroutines and mutating
+        # _subs mid-iteration would raise RuntimeError.
         dead: list[asyncio.Queue] = []
-        for q in self._subs:
+        for q in list(self._subs):
             try:
                 q.put_nowait(stamped)
             except asyncio.QueueFull:
