@@ -131,6 +131,29 @@ def create_app(
     client: httpx.AsyncClient,
     key_store: KeyStore | None = None,
 ) -> Starlette:
+    # Background tasks spawned by fire-and-forget endpoints. Holding a
+    # strong reference prevents the event loop from GC'ing them mid-run,
+    # and the done-callback ensures the set drains automatically.
+    bg_tasks: set[asyncio.Task] = set()
+
+    def _spawn(coro, *, name: str | None = None) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=name)
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
+        task.add_done_callback(_log_task_exception)
+        return task
+
+    def _log_task_exception(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning(
+                "background_task_failed",
+                task=task.get_name(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
 
     # Shared key store. If the caller provided one (so the same
     # instance is also passed to build_registry for MCPAuthedProbe),
@@ -217,8 +240,9 @@ def create_app(
         if provider is None:
             return JSONResponse({"error": "unknown target"}, status_code=404)
         # Fire-and-forget. Result will appear in the SSE stream + stats.
-        asyncio.create_task(
-            run_and_publish(provider, client, state, source="manual")
+        _spawn(
+            run_and_publish(provider, client, state, source="manual"),
+            name=f"fire_target:{name}",
         )
         return JSONResponse({"name": name, "fired": True}, status_code=202)
 
@@ -358,10 +382,11 @@ def create_app(
         import random as _r
         _r.shuffle(providers)
 
-        asyncio.create_task(
+        _spawn(
             _fire_all_runner(
                 providers, concurrency, gap_min, gap_max, source="fire-all",
-            )
+            ),
+            name="fire_all_runner",
         )
         # With concurrency=C and per-request time ≈T_req, total ≈
         # (T_req * N) / C + launch_gap * N; we don't know T_req so we
